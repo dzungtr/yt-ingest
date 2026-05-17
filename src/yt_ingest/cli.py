@@ -170,10 +170,37 @@ def synthesize() -> None:
     )
 
 
+_ASK_SYSTEM = """\
+You are a research assistant with access to notes from multiple YouTube videos. \
+Answer the user's question using only the provided context. Be concise and cite \
+which video the information comes from where relevant. \
+Return valid JSON: {"answer": "your answer here"}"""
+
+
 @app.command()
 def ask(question: str = typer.Argument(..., help="Question to answer")) -> None:
     """Answer a question using the knowledge base."""
-    typer.echo(f"ask: {question!r} — not yet implemented")
+    from yt_ingest.llm import chat_json
+    from yt_ingest.retrieval import search
+
+    cfg = get_config()
+    try:
+        chunks = search(question, cfg.faiss_index_dir, top_k=5)
+    except FileNotFoundError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    context = "\n\n---\n\n".join(
+        f"[{c.video_id}]\n{c.text}" for c in chunks
+    )
+    user_msg = f"Context:\n\n{context}\n\nQuestion: {question}"
+    raw, stats = chat_json(system=_ASK_SYSTEM, user=user_msg)
+    answer = raw.get("answer", "") if isinstance(raw, dict) else str(raw)
+    typer.echo(answer)
+    typer.echo(
+        f"\n(cache hit={stats.hit_tokens} miss={stats.miss_tokens})",
+        err=True,
+    )
 
 
 @app.command()
@@ -182,7 +209,14 @@ def run(
     allow_whisper: bool = typer.Option(False, "--allow-whisper"),
 ) -> None:
     """Run the full pipeline: fetch → extract → index → synthesize."""
-    typer.echo("run — not yet implemented")
+    typer.echo("=== fetch ===")
+    fetch(urls_file=urls_file, allow_whisper=allow_whisper)
+    typer.echo("=== extract ===")
+    extract()
+    typer.echo("=== index ===")
+    index()
+    typer.echo("=== synthesize ===")
+    synthesize()
 
 
 if __name__ == "__main__":
