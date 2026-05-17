@@ -7,6 +7,12 @@ import typer
 
 from yt_ingest.config import get_config
 from yt_ingest.retrieval import build_index
+from yt_ingest.synthesize import (
+    _CHECKSUM_FILE,
+    _SYNTHESIS_FILE,
+    _notes_checksum,
+    synthesize_notes,
+)
 from yt_ingest.extract import (
     checksum_path,
     extract_from_cache,
@@ -139,8 +145,29 @@ def index() -> None:
 
 @app.command()
 def synthesize() -> None:
-    """Generate cross-video synthesis index."""
-    typer.echo("synthesize — not yet implemented")
+    """Generate cross-video synthesis from all notes."""
+    cfg = get_config()
+    cs = _notes_checksum(cfg.notes_dir)
+    cs_path = cfg.notes_dir / _CHECKSUM_FILE
+    out_path = cfg.notes_dir / _SYNTHESIS_FILE
+
+    if cs_path.exists() and out_path.exists() and cs_path.read_text().strip() == cs:
+        typer.echo("Synthesis up-to-date.")
+        return
+
+    typer.echo("Synthesizing notes…")
+    try:
+        markdown, stats = synthesize_notes(cfg.notes_dir, cfg.faiss_index_dir)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    out_path.write_text(markdown)
+    cs_path.write_text(cs)
+    typer.echo(
+        f"Synthesis written to {out_path}  "
+        f"(cache hit={stats.hit_tokens} miss={stats.miss_tokens})"
+    )
 
 
 @app.command()
