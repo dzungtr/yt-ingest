@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 
 from yt_ingest.config import get_config
+from yt_ingest.retrieval import build_index
 from yt_ingest.extract import (
     checksum_path,
     extract_from_cache,
@@ -128,7 +129,12 @@ def extract() -> None:
 @app.command()
 def index() -> None:
     """Build FAISS vector index from notes."""
-    typer.echo("index — not yet implemented")
+    cfg = get_config()
+    n = build_index(cfg.notes_dir, cfg.faiss_index_dir)
+    if n == 0:
+        typer.echo("No notes found. Run 'extract' first.")
+        raise typer.Exit(1)
+    typer.echo(f"Indexed {n} chunks.")
 
 
 @app.command()
