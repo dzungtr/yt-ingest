@@ -7,7 +7,7 @@ import tiktoken
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from yt_ingest.llm import CacheStats, chat_json
-from yt_ingest.models import ExtractedContent, TranscriptCache
+from yt_ingest.models import TranscriptCache
 from yt_ingest.utils import seconds_to_mmss
 
 logger = logging.getLogger(__name__)
@@ -17,29 +17,22 @@ _CHUNK_TOKENS = 6_000
 _OVERLAP_TOKENS = 200
 
 _SYSTEM_PROMPT = """\
-You are a precise research assistant. Extract structured knowledge from the \
-provided YouTube video transcript. Return valid JSON matching this schema exactly:
+You are a professional blog writer. Transform the provided YouTube video transcript \
+into an engaging, well-structured blog post. Write in clear prose paragraphs with \
+natural section headings. Capture the core ideas, insights, and narrative of the video. \
+Do not use bullet lists — write flowing sentences and paragraphs instead. \
+Return valid JSON: {"blog_post": "full blog post in markdown format"}"""
 
-{
-  "summary": "string — 3-5 sentences",
-  "key_claims": [{"text": "string", "timestamp_seconds": number}],
-  "frameworks_and_mental_models": ["string"],
-  "definitions": {"term": "definition"},
-  "worth_rewatching": [{"timestamp_seconds": number, "reason": "string"}],
-  "counterpoints_and_caveats": ["string"],
-  "open_questions": ["string"]
-}
-
-Use only information present in the transcript. For timestamps, use the \
-start time of the relevant segment."""
+_MERGE_PROMPT = """\
+You are a professional blog editor. The following are draft blog sections written \
+from sequential parts of a single YouTube video. Merge them into one cohesive, \
+well-structured blog post. Eliminate redundancy, ensure smooth transitions, and \
+preserve all key insights. Write in clear prose — no bullet lists. \
+Return valid JSON: {"blog_post": "full merged blog post in markdown format"}"""
 
 
 def _encoding() -> tiktoken.Encoding:
     return tiktoken.get_encoding("cl100k_base")
-
-
-def _count_tokens(text: str) -> int:
-    return len(_encoding().encode(text))
 
 
 def _chunk_transcript(cache: TranscriptCache) -> list[str]:
@@ -54,7 +47,6 @@ def _chunk_transcript(cache: TranscriptCache) -> list[str]:
         toks = enc.encode(line)
         if current_count + len(toks) > _CHUNK_TOKENS and current_tokens:
             chunks.append(enc.decode(current_tokens))
-            # keep overlap
             overlap = current_tokens[-_OVERLAP_TOKENS:]
             current_tokens = list(overlap) + list(toks)
             current_count = len(current_tokens)
@@ -68,51 +60,10 @@ def _chunk_transcript(cache: TranscriptCache) -> list[str]:
     return chunks or [""]
 
 
-def _merge_extractions(parts: list[ExtractedContent]) -> ExtractedContent:
-    if len(parts) == 1:
-        return parts[0]
-    summaries = " ".join(p.summary for p in parts)
-    key_claims = [c for p in parts for c in p.key_claims]
-    frameworks: list[str] = []
-    seen_fw: set[str] = set()
-    for p in parts:
-        for fm in p.frameworks_and_mental_models:
-            if fm not in seen_fw:
-                frameworks.append(fm)
-                seen_fw.add(fm)
-    definitions: dict[str, str] = {}
-    for p in parts:
-        definitions.update(p.definitions)
-    worth = [w for p in parts for w in p.worth_rewatching]
-    caveats: list[str] = []
-    seen_c: set[str] = set()
-    for p in parts:
-        for c in p.counterpoints_and_caveats:
-            if c not in seen_c:
-                caveats.append(c)
-                seen_c.add(c)
-    questions: list[str] = []
-    seen_q: set[str] = set()
-    for p in parts:
-        for q in p.open_questions:
-            if q not in seen_q:
-                questions.append(q)
-                seen_q.add(q)
-    return ExtractedContent(
-        summary=summaries,
-        key_claims=key_claims,
-        frameworks_and_mental_models=frameworks,
-        definitions=definitions,
-        worth_rewatching=worth,
-        counterpoints_and_caveats=caveats,
-        open_questions=questions,
-    )
-
-
-def extract_from_cache(cache: TranscriptCache) -> tuple[ExtractedContent, CacheStats]:
-    """Extract structured notes from a transcript cache entry."""
+def extract_from_cache(cache: TranscriptCache) -> tuple[str, CacheStats]:
+    """Transform a transcript into a blog post. Returns (blog_post_markdown, CacheStats)."""
     chunks = _chunk_transcript(cache)
-    parts: list[ExtractedContent] = []
+    drafts: list[str] = []
     total_stats = CacheStats()
 
     for i, chunk in enumerate(chunks):
@@ -121,11 +72,18 @@ def extract_from_cache(cache: TranscriptCache) -> tuple[ExtractedContent, CacheS
             f"Transcript chunk {i + 1}/{len(chunks)}:\n\n{chunk}"
         )
         raw, stats = chat_json(system=_SYSTEM_PROMPT, user=user_msg)
-        parts.append(ExtractedContent.model_validate(raw))
+        drafts.append(raw.get("blog_post", ""))
         total_stats = total_stats.merge(stats)
 
-    content = _merge_extractions(parts)
-    return content, total_stats
+    if len(drafts) == 1:
+        return drafts[0], total_stats
+
+    combined = "\n\n---\n\n".join(
+        f"## Draft section {i + 1}\n\n{d}" for i, d in enumerate(drafts)
+    )
+    raw, stats = chat_json(system=_MERGE_PROMPT, user=combined)
+    total_stats = total_stats.merge(stats)
+    return raw.get("blog_post", "\n\n".join(drafts)), total_stats
 
 
 def _checksum(cache: TranscriptCache) -> str:
@@ -135,13 +93,12 @@ def _checksum(cache: TranscriptCache) -> str:
 
 def render_note(
     cache: TranscriptCache,
-    content: ExtractedContent,
+    blog_post: str,
 ) -> str:
     env = Environment(
         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
         autoescape=select_autoescape([]),
     )
-    env.filters["mmss"] = seconds_to_mmss
     template = env.get_template("note.md.j2")
     return template.render(
         title=cache.title,
@@ -150,7 +107,7 @@ def render_note(
         video_id=cache.video_id,
         url=cache.url,
         source=cache.source.value,
-        content=content,
+        blog_post=blog_post,
     )
 
 

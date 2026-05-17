@@ -1,62 +1,8 @@
 # {{ title }}
 
-**Channel:** {{ channel }}
-**Duration:** {{ duration }}
-**Video ID:** `{{ video_id }}`
-**URL:** {{ url }}
-**Transcript source:** {{ source }}
+**Channel:** {{ channel }} | **Duration:** {{ duration }} | **Source:** {{ source }}
+**Video ID:** `{{ video_id }}` | **URL:** {{ url }}
 
 ---
 
-## Summary
-
-{{ content.summary }}
-
----
-
-## Key Claims
-
-{% for claim in content.key_claims -%}
-- **[{{ claim.timestamp_seconds | mmss }}]** {{ claim.text }}
-{% endfor %}
-
----
-
-## Frameworks & Mental Models
-
-{% for fm in content.frameworks_and_mental_models -%}
-- {{ fm }}
-{% endfor %}
-
----
-
-## Definitions
-
-{% for term, definition in content.definitions.items() -%}
-**{{ term }}:** {{ definition }}
-
-{% endfor %}
-
----
-
-## Worth Rewatching
-
-{% for wr in content.worth_rewatching -%}
-- **[{{ wr.timestamp_seconds | mmss }}]** {{ wr.reason }}
-{% endfor %}
-
----
-
-## Counterpoints & Caveats
-
-{% for cp in content.counterpoints_and_caveats -%}
-- {{ cp }}
-{% endfor %}
-
----
-
-## Open Questions
-
-{% for q in content.open_questions -%}
-- {{ q }}
-{% endfor %}
+{{ blog_post }}
