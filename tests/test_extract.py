@@ -1,25 +1,18 @@
 from __future__ import annotations
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from yt_ingest.extract import (
     _checksum,
     _chunk_transcript,
-    _merge_extractions,
     extract_from_cache,
     render_note,
 )
 from yt_ingest.llm import CacheStats
 from yt_ingest.models import (
-    ExtractedContent,
-    KeyClaim,
     TranscriptCache,
     TranscriptSegment,
     TranscriptSource,
-    WorthRewatching,
 )
 
 
@@ -40,18 +33,6 @@ def _make_cache(n_segments: int = 3) -> TranscriptCache:
     )
 
 
-def _make_content() -> ExtractedContent:
-    return ExtractedContent(
-        summary="A test summary.",
-        key_claims=[KeyClaim(text="Claim one", timestamp_seconds=5.0)],
-        frameworks_and_mental_models=["Framework A"],
-        definitions={"term": "definition"},
-        worth_rewatching=[WorthRewatching(timestamp_seconds=10.0, reason="Great example")],
-        counterpoints_and_caveats=["Caveat one"],
-        open_questions=["Question one?"],
-    )
-
-
 # --- _chunk_transcript ---
 
 def test_chunk_transcript_small_fits_in_one() -> None:
@@ -69,68 +50,60 @@ def test_chunk_transcript_preserves_all_text() -> None:
         assert f"segment {i}" in full
 
 
-# --- _merge_extractions ---
-
-def test_merge_single_returns_same() -> None:
-    content = _make_content()
-    merged = _merge_extractions([content])
-    assert merged.summary == content.summary
-
-
-def test_merge_deduplicates_frameworks() -> None:
-    c1 = _make_content()
-    c2 = _make_content()
-    merged = _merge_extractions([c1, c2])
-    assert merged.frameworks_and_mental_models.count("Framework A") == 1
-
-
-def test_merge_combines_key_claims() -> None:
-    c1 = _make_content()
-    c2 = ExtractedContent(
-        summary="Second",
-        key_claims=[KeyClaim(text="Claim two", timestamp_seconds=20.0)],
-        frameworks_and_mental_models=[],
-        definitions={},
-        worth_rewatching=[],
-        counterpoints_and_caveats=[],
-        open_questions=[],
-    )
-    merged = _merge_extractions([c1, c2])
-    assert len(merged.key_claims) == 2
-
-
 # --- render_note ---
 
 def test_render_note_contains_title() -> None:
     cache = _make_cache()
-    content = _make_content()
-    note = render_note(cache, content)
+    note = render_note(cache, "This is the blog post content.")
     assert "Test Video" in note
     assert "Test Channel" in note
     assert "dQw4w9WgXcQ" in note
 
 
-def test_render_note_formats_timestamps() -> None:
+def test_render_note_includes_blog_post() -> None:
     cache = _make_cache()
-    content = _make_content()
-    note = render_note(cache, content)
-    assert "0:05" in note or "0:10" in note
+    blog = "## Introduction\n\nThis is the blog post body."
+    note = render_note(cache, blog)
+    assert "## Introduction" in note
+    assert "This is the blog post body." in note
 
 
 # --- extract_from_cache ---
 
-def test_extract_from_cache_calls_llm() -> None:
+def test_extract_from_cache_returns_blog_string() -> None:
     cache = _make_cache()
-    content = _make_content()
-    raw = content.model_dump()
     stats = CacheStats(hit_tokens=50, miss_tokens=50, total_calls=1)
+    blog_text = "## My Blog Post\n\nGreat content here."
 
-    with patch("yt_ingest.extract.chat_json", return_value=(raw, stats)) as mock_llm:
+    with patch("yt_ingest.extract.chat_json", return_value=({"blog_post": blog_text}, stats)) as mock_llm:
         result, result_stats = extract_from_cache(cache)
 
     assert mock_llm.called
-    assert result.summary == content.summary
+    assert result == blog_text
     assert result_stats.total_calls == 1
+
+
+def test_extract_from_cache_merges_multiple_chunks() -> None:
+    cache = _make_cache()
+    stats = CacheStats(hit_tokens=10, miss_tokens=10, total_calls=1)
+    draft = "Draft content."
+    merged = "## Merged Blog\n\nUnified content."
+
+    call_count = 0
+
+    def fake_chat_json(**kwargs: object) -> tuple[dict[str, str], CacheStats]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {"blog_post": draft}, stats
+        return {"blog_post": merged}, stats
+
+    with patch("yt_ingest.extract._chunk_transcript", return_value=["chunk1", "chunk2"]):
+        with patch("yt_ingest.extract.chat_json", side_effect=fake_chat_json):
+            result, _ = extract_from_cache(cache)
+
+    assert call_count == 3  # 2 chunk calls + 1 merge call
+    assert result == merged
 
 
 # --- _checksum ---
