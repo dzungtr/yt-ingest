@@ -1,5 +1,4 @@
 .env
-.worktrees/
 transcripts/
 notes/
 .faiss_index/
