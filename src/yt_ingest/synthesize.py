@@ -47,7 +47,7 @@ def synthesize_notes(notes_dir: Path, index_dir: Path) -> tuple[str, CacheStats]
     raw, stats = chat_json(
         system=_SYSTEM_PROMPT,
         user=user_msg,
-        model="deepseek-v4-pro",
+        model="deepseek-v4-flash",
         temperature=0.0,
     )
 
