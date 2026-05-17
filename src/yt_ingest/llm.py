@@ -41,7 +41,7 @@ def chat_json(
     *,
     system: str,
     user: str,
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-pro",
     temperature: float = 0.0,
 ) -> tuple[Any, CacheStats]:
     """
