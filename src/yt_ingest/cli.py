@@ -1,7 +1,9 @@
 from __future__ import annotations
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -46,17 +48,28 @@ def _save_cache(cache: TranscriptCache, path: Path) -> None:
 
 @app.command()
 def fetch(
-    urls_file: str = typer.Argument(..., help="Path to file with YouTube URLs"),
+    url: Optional[str] = typer.Argument(None, help="Single YouTube URL to fetch"),
+    file: Optional[str] = typer.Option(None, "--file", help="Path to file with YouTube URLs"),
     allow_whisper: bool = typer.Option(False, "--allow-whisper", help="Enable Whisper fallback (slow)"),
 ) -> None:
     """Fetch transcripts for all URLs and cache them to disk."""
+    if url is not None and file is not None:
+        typer.echo("Error: provide either a URL argument or --file, not both.", err=True)
+        raise typer.Exit(1)
+    if url is None and file is None:
+        typer.echo("Error: provide either a URL argument or --file.", err=True)
+        raise typer.Exit(1)
+
     cfg = get_config()
     cfg.ensure_dirs()
 
-    urls = load_urls(Path(urls_file))
-    if not urls:
-        typer.echo("No URLs found in file.")
-        raise typer.Exit(1)
+    if file is not None:
+        urls = load_urls(Path(file))
+        if not urls:
+            typer.echo("No URLs found in file.")
+            raise typer.Exit(1)
+    else:
+        urls = [url]
 
     fetchers: list[TranscriptFetcher] = [YouTubeAPIFetcher(), YtDlpFetcher()]
     if allow_whisper:
@@ -205,12 +218,13 @@ def ask(question: str = typer.Argument(..., help="Question to answer")) -> None:
 
 @app.command()
 def run(
-    urls_file: str = typer.Argument(..., help="Path to file with YouTube URLs"),
+    url: Optional[str] = typer.Argument(None, help="Single YouTube URL to process"),
+    file: Optional[str] = typer.Option(None, "--file", help="Path to file with YouTube URLs"),
     allow_whisper: bool = typer.Option(False, "--allow-whisper"),
 ) -> None:
     """Run the full pipeline: fetch → extract → index → synthesize."""
     typer.echo("=== fetch ===")
-    fetch(urls_file=urls_file, allow_whisper=allow_whisper)
+    fetch(url=url, file=file, allow_whisper=allow_whisper)
     typer.echo("=== extract ===")
     extract()
     typer.echo("=== index ===")
