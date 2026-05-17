@@ -6,6 +6,13 @@ from pathlib import Path
 import typer
 
 from yt_ingest.config import get_config
+from yt_ingest.extract import (
+    checksum_path,
+    extract_from_cache,
+    note_path,
+    render_note,
+    _checksum,
+)
 from yt_ingest.fetchers.base import FetchError, TranscriptFetcher, run_fetcher_chain
 from yt_ingest.fetchers.youtube_api import YouTubeAPIFetcher
 from yt_ingest.fetchers.ytdlp import YtDlpFetcher
@@ -83,7 +90,39 @@ def fetch(
 @app.command()
 def extract() -> None:
     """Extract structured notes from cached transcripts."""
-    typer.echo("extract — not yet implemented")
+    cfg = get_config()
+    cfg.ensure_dirs()
+
+    transcript_files = sorted(cfg.transcripts_dir.glob("*.json"))
+    if not transcript_files:
+        typer.echo("No cached transcripts found. Run 'fetch' first.")
+        raise typer.Exit(1)
+
+    ok = 0
+    skipped = 0
+    for tf in transcript_files:
+        cache = TranscriptCache.model_validate_json(tf.read_text())
+        npath = note_path(cfg.notes_dir, cache.video_id)
+        cpath = checksum_path(cfg.notes_dir, cache.video_id)
+
+        current_cs = _checksum(cache)
+        if cpath.exists() and npath.exists() and cpath.read_text().strip() == current_cs:
+            typer.echo(f"SKIP  {cache.video_id}  (up-to-date)")
+            skipped += 1
+            continue
+
+        typer.echo(f"EXTRACT {cache.video_id}  ({cache.title[:50]})")
+        content, stats = extract_from_cache(cache)
+        note = render_note(cache, content)
+        npath.write_text(note)
+        cpath.write_text(current_cs)
+        typer.echo(
+            f"OK    {cache.video_id}  "
+            f"cache hit={stats.hit_tokens} miss={stats.miss_tokens}"
+        )
+        ok += 1
+
+    typer.echo(f"\nDone: {ok} extracted, {skipped} skipped.")
 
 
 @app.command()
