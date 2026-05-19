@@ -16,19 +16,68 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _CHUNK_TOKENS = 6_000
 _OVERLAP_TOKENS = 200
 
-_SYSTEM_PROMPT = """\
-You are a professional blog writer. Transform the provided YouTube video transcript \
-into an engaging, well-structured blog post. Write in clear prose paragraphs with \
-natural section headings. Capture the core ideas, insights, and narrative of the video. \
-Do not use bullet lists — write flowing sentences and paragraphs instead. \
-Return valid JSON: {"blog_post": "full blog post in markdown format"}"""
+_DRAFT_PROMPT = """\
+You are a study-note writer. Transform the provided YouTube video transcript \
+chunk into dense study notes for a reader who wants to absorb the content \
+faster than watching the video.
+
+Output format:
+- Start with a short TL;DR (3-5 lines) summarising what this chunk covers.
+- Then write the body using clear prose paragraphs with section headings. Use \
+bullet or numbered lists only when they genuinely aid scanning (enumerations, \
+steps, comparisons). Default to prose.
+- Third-person, neutral voice. Refer to the speaker as "the speaker" or by \
+name. No first-person narration.
+
+Density target: roughly 20-30% of the input chunk's word count. When in doubt, \
+cut.
+
+Always keep:
+- Concrete numbers, dates, names of tools/people/companies/products.
+- Analogies and metaphors used to explain concepts.
+- Caveats, counterarguments, and stated limitations.
+- Step-by-step procedures and how-tos.
+- The speaker's opinions, recommendations, and predictions about the future.
+
+Keep only if load-bearing (i.e. it carries the argument, not just illustrates \
+it):
+- Specific examples and case studies.
+- Verbatim quotes.
+
+Always drop:
+- Personal anecdotes from the speaker ("when I was at X, I...").
+- Sponsor reads, channel plugs, intros, outros, calls to subscribe.
+- Filler words, verbal tics, hedging phrases, hype language, dramatic build-up.
+- Repetition and restating of the same point.
+
+Return valid JSON: {"blog_post": "study notes in markdown format"}"""
 
 _MERGE_PROMPT = """\
-You are a professional blog editor. The following are draft blog sections written \
-from sequential parts of a single YouTube video. Merge them into one cohesive, \
-well-structured blog post. Eliminate redundancy, ensure smooth transitions, and \
-preserve all key insights. Write in clear prose — no bullet lists. \
-Return valid JSON: {"blog_post": "full merged blog post in markdown format"}"""
+You are a study-note editor. The following are draft study-note sections \
+written from sequential chunks of a single YouTube video. Merge them into one \
+cohesive study note.
+
+Required output structure:
+- A single TL;DR at the top (3-7 lines) summarising the entire video. Replace \
+the per-chunk TL;DRs — do not stack them.
+- Then a unified body with section headings drawn from the actual content, \
+not "Part 1" / "Chunk 2". Reorder material if it improves flow.
+- Use prose paragraphs by default. Bullet or numbered lists only where they \
+genuinely aid scanning (enumerations, steps, comparisons).
+- Third-person, neutral voice throughout.
+
+Editing rules:
+- Eliminate redundancy across chunks: if the same claim, number, or caveat \
+appears twice, keep it once at its most useful location.
+- Preserve every distinct claim, number, name, caveat, procedure, opinion, \
+analogy, and prediction from the drafts. Do not add new information that is \
+not in the drafts.
+- Do not re-introduce filler, hype, personal anecdotes, or sponsor content \
+even if it survived into a draft.
+- The merged note should be no longer than the sum of the drafts, and ideally \
+shorter once redundancy is removed.
+
+Return valid JSON: {"blog_post": "merged study notes in markdown format"}"""
 
 
 def _encoding() -> tiktoken.Encoding:
@@ -71,7 +120,7 @@ def extract_from_cache(cache: TranscriptCache) -> tuple[str, CacheStats]:
             f"Video: {cache.title!r} by {cache.channel}\n\n"
             f"Transcript chunk {i + 1}/{len(chunks)}:\n\n{chunk}"
         )
-        raw, stats = chat_json(system=_SYSTEM_PROMPT, user=user_msg)
+        raw, stats = chat_json(system=_DRAFT_PROMPT, user=user_msg)
         drafts.append(raw.get("blog_post", ""))
         total_stats = total_stats.merge(stats)
 
