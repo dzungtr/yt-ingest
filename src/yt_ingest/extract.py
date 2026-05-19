@@ -16,12 +16,41 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _CHUNK_TOKENS = 6_000
 _OVERLAP_TOKENS = 200
 
-_SYSTEM_PROMPT = """\
-You are a professional blog writer. Transform the provided YouTube video transcript \
-into an engaging, well-structured blog post. Write in clear prose paragraphs with \
-natural section headings. Capture the core ideas, insights, and narrative of the video. \
-Do not use bullet lists — write flowing sentences and paragraphs instead. \
-Return valid JSON: {"blog_post": "full blog post in markdown format"}"""
+_DRAFT_PROMPT = """\
+You are a study-note writer. Transform the provided YouTube video transcript \
+chunk into dense study notes for a reader who wants to absorb the content \
+faster than watching the video.
+
+Output format:
+- Start with a short TL;DR (3-5 lines) summarising what this chunk covers.
+- Then write the body using clear prose paragraphs with section headings. Use \
+bullet or numbered lists only when they genuinely aid scanning (enumerations, \
+steps, comparisons). Default to prose.
+- Third-person, neutral voice. Refer to the speaker as "the speaker" or by \
+name. No first-person narration.
+
+Density target: roughly 20-30% of the input chunk's word count. When in doubt, \
+cut.
+
+Always keep:
+- Concrete numbers, dates, names of tools/people/companies/products.
+- Analogies and metaphors used to explain concepts.
+- Caveats, counterarguments, and stated limitations.
+- Step-by-step procedures and how-tos.
+- The speaker's opinions, recommendations, and predictions about the future.
+
+Keep only if load-bearing (i.e. it carries the argument, not just illustrates \
+it):
+- Specific examples and case studies.
+- Verbatim quotes.
+
+Always drop:
+- Personal anecdotes from the speaker ("when I was at X, I...").
+- Sponsor reads, channel plugs, intros, outros, calls to subscribe.
+- Filler words, verbal tics, hedging phrases, hype language, dramatic build-up.
+- Repetition and restating of the same point.
+
+Return valid JSON: {"blog_post": "study notes in markdown format"}"""
 
 _MERGE_PROMPT = """\
 You are a professional blog editor. The following are draft blog sections written \
@@ -71,7 +100,7 @@ def extract_from_cache(cache: TranscriptCache) -> tuple[str, CacheStats]:
             f"Video: {cache.title!r} by {cache.channel}\n\n"
             f"Transcript chunk {i + 1}/{len(chunks)}:\n\n{chunk}"
         )
-        raw, stats = chat_json(system=_SYSTEM_PROMPT, user=user_msg)
+        raw, stats = chat_json(system=_DRAFT_PROMPT, user=user_msg)
         drafts.append(raw.get("blog_post", ""))
         total_stats = total_stats.merge(stats)
 
