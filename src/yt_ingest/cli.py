@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.table import Table
+from rich import print as rprint
 
 from yt_ingest.config import get_config
 from yt_ingest.retrieval import build_index
@@ -30,6 +34,8 @@ from yt_ingest.models import TranscriptCache
 from yt_ingest.utils import extract_video_id, load_urls
 
 app = typer.Typer(name="yt-ingest", add_completion=False)
+console = Console()
+err_console = Console(stderr=True)
 
 
 def _cache_path(transcripts_dir: Path, video_id: str) -> Path:
@@ -54,10 +60,10 @@ def fetch(
 ) -> None:
     """Fetch transcripts for all URLs and cache them to disk."""
     if url is not None and file is not None:
-        typer.echo("Error: provide either a URL argument or --file, not both.", err=True)
+        err_console.print("[red]Error:[/red] provide either a URL argument or --file, not both.")
         raise typer.Exit(1)
     if url is None and file is None:
-        typer.echo("Error: provide either a URL argument or --file.", err=True)
+        err_console.print("[red]Error:[/red] provide either a URL argument or --file.")
         raise typer.Exit(1)
 
     cfg = get_config()
@@ -66,7 +72,7 @@ def fetch(
     if file is not None:
         urls = load_urls(Path(file))
         if not urls:
-            typer.echo("No URLs found in file.")
+            console.print("[yellow]No URLs found in file.[/yellow]")
             raise typer.Exit(1)
     else:
         urls = [url]
@@ -77,32 +83,37 @@ def fetch(
 
     ok = 0
     failed = 0
-    for url in urls:
+    for u in urls:
         try:
-            video_id = extract_video_id(url)
+            video_id = extract_video_id(u)
         except ValueError as exc:
-            typer.echo(f"SKIP  {url}: {exc}", err=True)
+            err_console.print(f"[yellow]SKIP[/yellow]  {u}: {exc}")
             failed += 1
             continue
 
         cache_file = _cache_path(cfg.transcripts_dir, video_id)
         if _load_cache(cache_file) is not None:
-            typer.echo(f"HIT   {video_id}")
+            console.print(f"[cyan]HIT [/cyan]  {video_id}")
             ok += 1
             continue
 
-        try:
-            cache = run_fetcher_chain(fetchers, video_id, url)
-        except FetchError as exc:
-            typer.echo(f"FAIL  {video_id}: {exc}", err=True)
-            failed += 1
-            continue
+        with console.status(f"[dim]Fetching[/dim] {video_id}…", spinner="dots"):
+            try:
+                cache = run_fetcher_chain(fetchers, video_id, u)
+            except FetchError as exc:
+                err_console.print(f"[red]FAIL[/red]  {video_id}: {exc}")
+                failed += 1
+                continue
 
         _save_cache(cache, cache_file)
-        typer.echo(f"OK    {video_id}  [{cache.source.value}]  {len(cache.segments)} segments")
+        console.print(
+            f"[green]OK  [/green]  {video_id}"
+            f"  [dim]via {cache.source.value}  {len(cache.segments)} segments[/dim]"
+        )
         ok += 1
 
-    typer.echo(f"\nDone: {ok} ok, {failed} failed.")
+    console.rule()
+    console.print(f"[green]{ok} ok[/green]  [red]{failed} failed[/red]")
     if failed:
         raise typer.Exit(1)
 
@@ -115,7 +126,7 @@ def extract() -> None:
 
     transcript_files = sorted(cfg.transcripts_dir.glob("*.json"))
     if not transcript_files:
-        typer.echo("No cached transcripts found. Run 'fetch' first.")
+        err_console.print("[yellow]No cached transcripts found. Run 'fetch' first.[/yellow]")
         raise typer.Exit(1)
 
     ok = 0
@@ -127,33 +138,39 @@ def extract() -> None:
 
         current_cs = _checksum(cache)
         if cpath.exists() and npath.exists() and cpath.read_text().strip() == current_cs:
-            typer.echo(f"SKIP  {cache.video_id}  (up-to-date)")
+            console.print(f"[cyan]SKIP[/cyan]  {cache.video_id}  [dim](up-to-date)[/dim]")
             skipped += 1
             continue
 
-        typer.echo(f"EXTRACT {cache.video_id}  ({cache.title[:50]})")
-        content, stats = extract_from_cache(cache)
+        with console.status(
+            f"[dim]Extracting[/dim] {cache.video_id}  [dim]{cache.title[:50]}[/dim]…",
+            spinner="dots",
+        ):
+            content, stats = extract_from_cache(cache)
+
         note = render_note(cache, content)
         npath.write_text(note)
         cpath.write_text(current_cs)
-        typer.echo(
-            f"OK    {cache.video_id}  "
-            f"cache hit={stats.hit_tokens} miss={stats.miss_tokens}"
+        console.print(
+            f"[green]OK  [/green]  {cache.video_id}  "
+            f"[dim]cache hit={stats.hit_tokens} miss={stats.miss_tokens}[/dim]"
         )
         ok += 1
 
-    typer.echo(f"\nDone: {ok} extracted, {skipped} skipped.")
+    console.rule()
+    console.print(f"[green]{ok} extracted[/green]  [cyan]{skipped} skipped[/cyan]")
 
 
 @app.command()
 def index() -> None:
     """Build FAISS vector index from notes."""
     cfg = get_config()
-    n = build_index(cfg.notes_dir, cfg.faiss_index_dir)
+    with console.status("[dim]Building vector index…[/dim]", spinner="dots"):
+        n = build_index(cfg.notes_dir, cfg.faiss_index_dir)
     if n == 0:
-        typer.echo("No notes found. Run 'extract' first.")
+        err_console.print("[yellow]No notes found. Run 'extract' first.[/yellow]")
         raise typer.Exit(1)
-    typer.echo(f"Indexed {n} chunks.")
+    console.print(f"[green]Indexed[/green] {n} chunks.")
 
 
 @app.command()
@@ -165,21 +182,21 @@ def synthesize() -> None:
     out_path = cfg.notes_dir / _SYNTHESIS_FILE
 
     if cs_path.exists() and out_path.exists() and cs_path.read_text().strip() == cs:
-        typer.echo("Synthesis up-to-date.")
+        console.print("[cyan]Synthesis up-to-date.[/cyan]")
         return
 
-    typer.echo("Synthesizing notes…")
-    try:
-        markdown, stats = synthesize_notes(cfg.notes_dir, cfg.faiss_index_dir)
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(1) from exc
+    with console.status("[dim]Synthesizing notes…[/dim]", spinner="dots"):
+        try:
+            markdown, stats = synthesize_notes(cfg.notes_dir, cfg.faiss_index_dir)
+        except ValueError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
 
     out_path.write_text(markdown)
     cs_path.write_text(cs)
-    typer.echo(
-        f"Synthesis written to {out_path}  "
-        f"(cache hit={stats.hit_tokens} miss={stats.miss_tokens})"
+    console.print(
+        f"[green]Synthesis written to[/green] {out_path}  "
+        f"[dim](cache hit={stats.hit_tokens} miss={stats.miss_tokens})[/dim]"
     )
 
 
@@ -200,7 +217,7 @@ def ask(question: str = typer.Argument(..., help="Question to answer")) -> None:
     try:
         chunks = search(question, cfg.faiss_index_dir, top_k=5)
     except FileNotFoundError as exc:
-        typer.echo(str(exc), err=True)
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
     context = "\n\n---\n\n".join(
@@ -209,10 +226,12 @@ def ask(question: str = typer.Argument(..., help="Question to answer")) -> None:
     user_msg = f"Context:\n\n{context}\n\nQuestion: {question}"
     raw, stats = chat_json(system=_ASK_SYSTEM, user=user_msg)
     answer = raw.get("answer", "") if isinstance(raw, dict) else str(raw)
-    typer.echo(answer)
-    typer.echo(
-        f"\n(cache hit={stats.hit_tokens} miss={stats.miss_tokens})",
-        err=True,
+
+    console.rule()
+    console.print(answer)
+    console.rule()
+    err_console.print(
+        f"[dim]cache hit={stats.hit_tokens} miss={stats.miss_tokens}[/dim]"
     )
 
 
@@ -223,13 +242,13 @@ def run(
     allow_whisper: bool = typer.Option(False, "--allow-whisper"),
 ) -> None:
     """Run the full pipeline: fetch → extract → index → synthesize."""
-    typer.echo("=== fetch ===")
+    console.rule("[bold]fetch[/bold]")
     fetch(url=url, file=file, allow_whisper=allow_whisper)
-    typer.echo("=== extract ===")
+    console.rule("[bold]extract[/bold]")
     extract()
-    typer.echo("=== index ===")
+    console.rule("[bold]index[/bold]")
     index()
-    typer.echo("=== synthesize ===")
+    console.rule("[bold]synthesize[/bold]")
     synthesize()
 
 

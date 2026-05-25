@@ -14,14 +14,14 @@ cp .env.example .env        # then add DEEPSEEK_API_KEY
 ### Full pipeline (one command)
 
 ```bash
-yt-ingest run urls.txt
+yt-ingest run --file urls.txt
 ```
 
 ### Step by step
 
 ```bash
 # 1. Fetch transcripts for all URLs in the file
-yt-ingest fetch urls.txt
+yt-ingest fetch --file urls.txt
 
 # 2. Extract structured notes via DeepSeek
 yt-ingest extract
