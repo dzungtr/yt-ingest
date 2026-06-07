@@ -1,14 +1,10 @@
 from __future__ import annotations
-import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import typer
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-from rich.table import Table
 from rich import print as rprint
 
 from yt_ingest.config import get_config
@@ -31,7 +27,7 @@ from yt_ingest.fetchers.youtube_api import YouTubeAPIFetcher
 from yt_ingest.fetchers.ytdlp import YtDlpFetcher
 from yt_ingest.fetchers.whisper import WhisperFetcher
 from yt_ingest.models import TranscriptCache
-from yt_ingest.utils import extract_video_id, load_urls
+from yt_ingest.utils import extract_video_id, load_urls, seconds_to_mmss
 
 app = typer.Typer(name="yt-ingest", add_completion=False)
 console = Console()
@@ -52,13 +48,49 @@ def _save_cache(cache: TranscriptCache, path: Path) -> None:
     path.write_text(cache.model_dump_json(indent=2))
 
 
+def _format_transcript(cache: TranscriptCache) -> str:
+    lines: list[str] = []
+    for seg in cache.segments:
+        ts = seconds_to_mmss(seg.start)
+        lines.append(f"[{ts}] {seg.text}")
+    return "\n".join(lines)
+
+
+def _fetch_one(
+    video_id: str,
+    url: str,
+    transcripts_dir: Path,
+    *,
+    allow_whisper: bool = False,
+    save_cache: bool = True,
+) -> TranscriptCache:
+    """Fetch transcript for a single video. Uses disk cache only when save_cache=True."""
+    if save_cache:
+        cache_file = _cache_path(transcripts_dir, video_id)
+        cache = _load_cache(cache_file)
+        if cache is not None:
+            return cache
+
+    fetchers: list[TranscriptFetcher] = [YouTubeAPIFetcher(), YtDlpFetcher()]
+    if allow_whisper:
+        fetchers.append(WhisperFetcher())
+    cache = run_fetcher_chain(fetchers, video_id, url)
+
+    if save_cache:
+        _save_cache(cache, _cache_path(transcripts_dir, video_id))
+
+    return cache
+
+
 @app.command()
 def fetch(
     url: Optional[str] = typer.Argument(None, help="Single YouTube URL to fetch"),
     file: Optional[str] = typer.Option(None, "--file", help="Path to file with YouTube URLs"),
     allow_whisper: bool = typer.Option(False, "--allow-whisper", help="Enable Whisper fallback (slow)"),
+    agent: bool = typer.Option(False, "--agent", help="No-op in fetch (transcript already raw text)"),
+    output: Optional[str] = typer.Option(None, "--output", help="Write transcript text to file"),
 ) -> None:
-    """Fetch transcripts for all URLs and cache them to disk."""
+    """Fetch transcripts and cache them to disk."""
     if url is not None and file is not None:
         err_console.print("[red]Error:[/red] provide either a URL argument or --file, not both.")
         raise typer.Exit(1)
@@ -67,55 +99,74 @@ def fetch(
         raise typer.Exit(1)
 
     cfg = get_config()
-    cfg.ensure_dirs()
 
+    # --- Batch mode (--file) — unchanged ---
     if file is not None:
+        cfg.ensure_dirs()
         urls = load_urls(Path(file))
         if not urls:
             console.print("[yellow]No URLs found in file.[/yellow]")
             raise typer.Exit(1)
-    else:
-        urls = [url]
 
-    fetchers: list[TranscriptFetcher] = [YouTubeAPIFetcher(), YtDlpFetcher()]
-    if allow_whisper:
-        fetchers.append(WhisperFetcher())
+        fetchers: list[TranscriptFetcher] = [YouTubeAPIFetcher(), YtDlpFetcher()]
+        if allow_whisper:
+            fetchers.append(WhisperFetcher())
 
-    ok = 0
-    failed = 0
-    for u in urls:
-        try:
-            video_id = extract_video_id(u)
-        except ValueError as exc:
-            err_console.print(f"[yellow]SKIP[/yellow]  {u}: {exc}")
-            failed += 1
-            continue
-
-        cache_file = _cache_path(cfg.transcripts_dir, video_id)
-        if _load_cache(cache_file) is not None:
-            console.print(f"[cyan]HIT [/cyan]  {video_id}")
-            ok += 1
-            continue
-
-        with console.status(f"[dim]Fetching[/dim] {video_id}…", spinner="dots"):
+        ok = 0
+        failed = 0
+        for u in urls:
             try:
-                cache = run_fetcher_chain(fetchers, video_id, u)
-            except FetchError as exc:
-                err_console.print(f"[red]FAIL[/red]  {video_id}: {exc}")
+                video_id = extract_video_id(u)
+            except ValueError as exc:
+                err_console.print(f"[yellow]SKIP[/yellow]  {u}: {exc}")
                 failed += 1
                 continue
 
-        _save_cache(cache, cache_file)
-        console.print(
-            f"[green]OK  [/green]  {video_id}"
-            f"  [dim]via {cache.source.value}  {len(cache.segments)} segments[/dim]"
-        )
-        ok += 1
+            cache_file = _cache_path(cfg.transcripts_dir, video_id)
+            if _load_cache(cache_file) is not None:
+                console.print(f"[cyan]HIT [/cyan]  {video_id}")
+                ok += 1
+                continue
 
-    console.rule()
-    console.print(f"[green]{ok} ok[/green]  [red]{failed} failed[/red]")
-    if failed:
+            with console.status(f"[dim]Fetching[/dim] {video_id}…", spinner="dots"):
+                try:
+                    cache = run_fetcher_chain(fetchers, video_id, u)
+                except FetchError as exc:
+                    err_console.print(f"[red]FAIL[/red]  {video_id}: {exc}")
+                    failed += 1
+                    continue
+
+            _save_cache(cache, cache_file)
+            console.print(
+                f"[green]OK  [/green]  {video_id}"
+                f"  [dim]via {cache.source.value}  {len(cache.segments)} segments[/dim]"
+            )
+            ok += 1
+
+        console.rule()
+        console.print(f"[green]{ok} ok[/green]  [red]{failed} failed[/red]")
+        if failed:
+            raise typer.Exit(1)
+        return
+
+    # --- Single URL mode ---
+    try:
+        video_id = extract_video_id(url)
+    except ValueError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1)
+
+    try:
+        cache = _fetch_one(video_id, url, cfg.transcripts_dir, allow_whisper=allow_whisper)
+    except FetchError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1)
+
+    text = _format_transcript(cache)
+    if output is not None:
+        Path(output).write_text(text)
+    else:
+        rprint(text)
 
 
 @app.command()
@@ -240,16 +291,59 @@ def run(
     url: Optional[str] = typer.Argument(None, help="Single YouTube URL to process"),
     file: Optional[str] = typer.Option(None, "--file", help="Path to file with YouTube URLs"),
     allow_whisper: bool = typer.Option(False, "--allow-whisper"),
+    agent: bool = typer.Option(False, "--agent", help="Print raw transcript text, no LLM call"),
+    output: Optional[str] = typer.Option(None, "--output", help="Write output to file instead of stdout"),
 ) -> None:
-    """Run the full pipeline: fetch → extract → index → synthesize."""
-    console.rule("[bold]fetch[/bold]")
-    fetch(url=url, file=file, allow_whisper=allow_whisper)
-    console.rule("[bold]extract[/bold]")
-    extract()
-    console.rule("[bold]index[/bold]")
-    index()
-    console.rule("[bold]synthesize[/bold]")
-    synthesize()
+    """Run the full pipeline: fetch -> extract -> index -> synthesize."""
+    if url is not None and file is not None:
+        err_console.print("[red]Error:[/red] provide either a URL argument or --file, not both.")
+        raise typer.Exit(1)
+    if url is None and file is None:
+        err_console.print("[red]Error:[/red] provide either a URL argument or --file.")
+        raise typer.Exit(1)
+
+    if file is not None:
+        # Batch mode: full pipeline unchanged, --agent ignored
+        console.rule("[bold]fetch[/bold]")
+        fetch(url=None, file=file, allow_whisper=allow_whisper)
+        console.rule("[bold]extract[/bold]")
+        extract()
+        console.rule("[bold]index[/bold]")
+        index()
+        console.rule("[bold]synthesize[/bold]")
+        synthesize()
+        return
+
+    # --- Single URL mode ---
+    cfg = get_config()
+
+    try:
+        video_id = extract_video_id(url)
+    except ValueError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1)
+
+    try:
+        cache = _fetch_one(video_id, url, cfg.transcripts_dir, allow_whisper=allow_whisper, save_cache=False)
+    except FetchError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1)
+
+    if agent:
+        text = _format_transcript(cache)
+        if output is not None:
+            Path(output).write_text(text)
+        else:
+            rprint(text)
+        return
+
+    content, _stats = extract_from_cache(cache)
+    note = render_note(cache, content)
+
+    if output is not None:
+        Path(output).write_text(note)
+    else:
+        rprint(note)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,11 @@ def chat_json(
     Call DeepSeek chat, parse JSON from the response.
     Returns (parsed_object, CacheStats).
     """
+    cfg = get_config()
+    if not cfg.deepseek_api_key:
+        raise RuntimeError(
+            "DEEPSEEK_API_KEY is not set. Copy .env.example to .env and add your key."
+        )
     client = _get_client()
     response = client.chat.completions.create(
         model=model,

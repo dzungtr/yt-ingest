@@ -10,12 +10,7 @@ _config: "Config | None" = None
 class Config:
     def __init__(self) -> None:
         load_dotenv()
-        key = os.environ.get("DEEPSEEK_API_KEY", "")
-        if not key:
-            raise RuntimeError(
-                "DEEPSEEK_API_KEY is not set. Copy .env.example to .env and add your key."
-            )
-        self.deepseek_api_key: str = key
+        self.deepseek_api_key: str = os.environ.get("DEEPSEEK_API_KEY", "")
         self.transcripts_dir: Path = Path("transcripts")
         self.notes_dir: Path = Path("notes")
         self.faiss_index_dir: Path = Path(".faiss_index")
