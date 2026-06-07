@@ -30,11 +30,21 @@ def reset_client() -> None:
     llm_module._client = None
 
 
-def test_chat_json_returns_parsed_object() -> None:
+@pytest.fixture
+def _api_key() -> MagicMock:
+    cfg = MagicMock()
+    cfg.deepseek_api_key = "test-key"
+    return cfg
+
+
+def test_chat_json_returns_parsed_object(_api_key: MagicMock) -> None:
     payload = {"summary": "hello world"}
     response = _make_response(json.dumps(payload))
 
-    with patch("yt_ingest.llm._get_client") as mock_get:
+    with (
+        patch("yt_ingest.llm.get_config", return_value=_api_key),
+        patch("yt_ingest.llm._get_client") as mock_get,
+    ):
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = response
         mock_get.return_value = mock_client
@@ -45,10 +55,13 @@ def test_chat_json_returns_parsed_object() -> None:
     assert stats.total_calls == 1
 
 
-def test_chat_json_cache_stats_hit() -> None:
+def test_chat_json_cache_stats_hit(_api_key: MagicMock) -> None:
     response = _make_response(json.dumps({}), cached_tokens=80, prompt_tokens=100)
 
-    with patch("yt_ingest.llm._get_client") as mock_get:
+    with (
+        patch("yt_ingest.llm.get_config", return_value=_api_key),
+        patch("yt_ingest.llm._get_client") as mock_get,
+    ):
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = response
         mock_get.return_value = mock_client
@@ -59,7 +72,7 @@ def test_chat_json_cache_stats_hit() -> None:
     assert stats.miss_tokens == 20
 
 
-def test_chat_json_no_cache_details() -> None:
+def test_chat_json_no_cache_details(_api_key: MagicMock) -> None:
     usage = MagicMock()
     usage.prompt_tokens = 50
     usage.prompt_tokens_details = None
@@ -71,7 +84,10 @@ def test_chat_json_no_cache_details() -> None:
     response.choices = [choice]
     response.usage = usage
 
-    with patch("yt_ingest.llm._get_client") as mock_get:
+    with (
+        patch("yt_ingest.llm.get_config", return_value=_api_key),
+        patch("yt_ingest.llm._get_client") as mock_get,
+    ):
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = response
         mock_get.return_value = mock_client
@@ -80,6 +96,15 @@ def test_chat_json_no_cache_details() -> None:
 
     assert stats.hit_tokens == 0
     assert stats.miss_tokens == 50
+
+
+def test_chat_json_raises_without_api_key() -> None:
+    cfg = MagicMock()
+    cfg.deepseek_api_key = ""
+
+    with patch("yt_ingest.llm.get_config", return_value=cfg):
+        with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+            chat_json(system="sys", user="usr")
 
 
 def test_cache_stats_merge() -> None:
