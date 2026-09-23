@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import faiss  # type: ignore[import-untyped]
+import faiss  # faiss-cpu>=1.8 ships typed stubs
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
