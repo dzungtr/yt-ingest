@@ -61,12 +61,15 @@ flowchart TD
     V --> W[CLI ask command<br/><b>typer</b><br/>→ embed query → FAISS topK<br/>→ DeepSeek answer]
 ```
 
-Current model wiring (verified against `src/yt_ingest/llm.py` and
-`src/yt_ingest/synthesize.py`):
+Current model wiring (verified against `src/yt_ingest/llm.py`): models are
+resolved as provider-abstract tiers, not hard-coded names (ADR-0008):
 
-- Default model for `chat_json()`: `deepseek-v4-pro` — used for draft, merge,
-  and `ask`.
-- Synthesis overrides the default with `model="deepseek-v4-flash"`.
+- `chat_json()` default tier `strong` — used for draft, merge, and `ask`.
+- Synthesis uses the `fast` tier.
+- OpenAI-compatible defaults: `deepseek-v4-pro` (strong) /
+  `deepseek-v4-flash` (fast). Anthropic defaults: `claude-sonnet-4-5` (strong)
+  / `claude-haiku-4-5` (fast). Overridable via `YT_INGEST_MODEL` /
+  `YT_INGEST_FAST_MODEL`.
 - Synthesis output is written to `notes/synthesis.md` (not `_index.md`).
 
 ---
@@ -202,11 +205,17 @@ mutually exclusive. `--agent` is meaningful only on `run`.
 
 ## 6. Credentials
 
-Only one credential is required.
+The LLM layer is provider-abstract (see ADR-0008): whichever credential is
+present in the environment selects the backend, with OpenAI-compatible
+taking precedence.
 
 | Env var | Required | Purpose |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | **Yes** | All LLM calls (extraction, synthesis, ask) go through `openai.OpenAI(base_url="https://api.deepseek.com")`. |
+| `OPENAI_API_KEY` | If no Anthropic key | OpenAI-compatible endpoint (Chat Completions). Base URL via `OPENAI_BASE_URL`, default `https://api.deepseek.com`. |
+| `ANTHROPIC_API_KEY` | If no OpenAI key | Anthropic Messages API fallback (`anthropic` SDK; optional dependency `[anthropic]`). |
+| `DEEPSEEK_API_KEY` | Legacy | Still accepted: OpenAI-compatible with the DeepSeek base URL. |
+| `OPENAI_BASE_URL` | Optional | Override the OpenAI-compatible endpoint. |
+| `YT_INGEST_MODEL` / `YT_INGEST_FAST_MODEL` | Optional | Override the `strong` / `fast` model tiers (per-provider defaults apply otherwise). |
 | `HF_HOME` | Optional | Override HuggingFace cache location for embedding and Whisper models. |
 
 No YouTube Data API key, no Google OAuth, no Voyage/remote-embedding key.
@@ -310,6 +319,7 @@ Historical decisions are in the ADR set at `docs/adr/`:
 - `docs/adr/0005-study-note-as-primary-output-contract.md` — note shape.
 - `docs/adr/0006-rule-driven-prompts-over-few-shot.md` — prompt strategy.
 - `docs/adr/0007-cli-invocation-modes.md` — batch / single-URL / agent faces.
+- `docs/adr/0008-provider-abstract-llm-layer.md` — OpenAI-compatible vs Anthropic LLM providers.
 
 The ADRs capture **why**; this file captures **what**. The original
 superpowers specs (`docs/superpowers/specs/` and `docs/superpowers/plans/`)

@@ -32,6 +32,9 @@ dev = [
     "mypy>=1.10",
     "types-pyyaml",
 ]
+anthropic = [
+    "anthropic>=0.40",
+]
 
 [project.scripts]
 yt-ingest = "yt_ingest.cli:app"
