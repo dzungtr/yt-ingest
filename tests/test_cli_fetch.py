@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -209,7 +210,10 @@ def test_run_url_prints_study_note(tmp_path: Path) -> None:
     with (
         patch("yt_ingest.cli.get_config", return_value=_mock_config(tmp_path)),
         patch("yt_ingest.cli.run_fetcher_chain", return_value=cache),
-        patch("yt_ingest.cli.extract_from_cache", return_value=("# Study Note", mock_stats)),
+        patch(
+            "yt_ingest.cli.extract_from_cache",
+            return_value=("# Study Note", [], mock_stats),
+        ),
     ):
         result = runner.invoke(app, ["run", "https://youtu.be/dQw4w9WgXcQ"])
 
@@ -244,7 +248,10 @@ def test_run_url_output_writes_study_note(tmp_path: Path) -> None:
     with (
         patch("yt_ingest.cli.get_config", return_value=_mock_config(tmp_path)),
         patch("yt_ingest.cli.run_fetcher_chain", return_value=cache),
-        patch("yt_ingest.cli.extract_from_cache", return_value=("# Study Note", mock_stats)),
+        patch(
+            "yt_ingest.cli.extract_from_cache",
+            return_value=("# Study Note", [], mock_stats),
+        ),
     ):
         result = runner.invoke(
             app, ["run", "https://youtu.be/dQw4w9WgXcQ", "--output", str(out)]
@@ -335,3 +342,51 @@ def test_run_invalid_url_exits_nonzero(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "Error" in result.stderr
+
+
+# --- extract command: gems artifact ---
+
+def test_extract_command_writes_note_and_gems_file(tmp_path: Path) -> None:
+    from yt_ingest.llm import CacheStats
+    from yt_ingest.models import Gem, GemType
+
+    cfg = _mock_config(tmp_path)
+    cfg.notes_dir = tmp_path / "notes"
+    cfg.notes_dir.mkdir()
+    cache = _make_cache()
+    (cfg.transcripts_dir / "dQw4w9WgXcQ.json").write_text(cache.model_dump_json())
+
+    gem = Gem(
+        id="g001",
+        type=GemType.CAUSAL_LAW,
+        quote="Savings buildup leads to risk chasing.",
+        timestamp_start=61.0,
+        why="Core causal law.",
+        rank=1,
+    )
+    stats = CacheStats(hit_tokens=5, miss_tokens=5, total_calls=1)
+
+    with (
+        patch("yt_ingest.cli.get_config", return_value=cfg),
+        patch(
+            "yt_ingest.cli.extract_from_cache",
+            return_value=("# Study Note", [gem], stats),
+        ),
+    ):
+        result = runner.invoke(app, ["extract"])
+
+    assert result.exit_code == 0
+    note = cfg.notes_dir / "dQw4w9WgXcQ.md"
+    gems_file = cfg.notes_dir / "dQw4w9WgXcQ.gems.json"
+    assert "# Study Note" in note.read_text()
+    payload = json.loads(gems_file.read_text())
+    assert payload == [
+        {
+            "id": "g001",
+            "type": "causal_law",
+            "quote": "Savings buildup leads to risk chasing.",
+            "timestamp_start": 61.0,
+            "why": "Core causal law.",
+            "rank": 1,
+        }
+    ]

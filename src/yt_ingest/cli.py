@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -18,6 +19,7 @@ from yt_ingest.synthesize import (
 from yt_ingest.extract import (
     checksum_path,
     extract_from_cache,
+    gems_path,
     note_path,
     render_note,
     _checksum,
@@ -197,10 +199,14 @@ def extract() -> None:
             f"[dim]Extracting[/dim] {cache.video_id}  [dim]{cache.title[:50]}[/dim]…",
             spinner="dots",
         ):
-            content, stats = extract_from_cache(cache)
+            content, gems, stats = extract_from_cache(cache)
 
         note = render_note(cache, content)
         npath.write_text(note)
+        gems_file = gems_path(cfg.notes_dir, cache.video_id)
+        gems_file.write_text(
+            json.dumps([g.model_dump(mode="json") for g in gems], indent=2)
+        )
         cpath.write_text(current_cs)
         console.print(
             f"[green]OK  [/green]  {cache.video_id}  "
@@ -337,7 +343,7 @@ def run(
             rprint(text)
         return
 
-    content, _stats = extract_from_cache(cache)
+    content, _gems, _stats = extract_from_cache(cache)
     note = render_note(cache, content)
 
     if output is not None:
