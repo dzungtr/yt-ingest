@@ -97,6 +97,15 @@ class Verdict(BaseModel):
             raise ValueError("covered verdict must cite a note span")
         return self
 
+    @model_validator(mode="after")
+    def noncovered_requires_reason(self) -> Verdict:
+        if (
+            self.verdict in (VerdictStatus.MISSING, VerdictStatus.INAPPLICABLE)
+            and not self.reason.strip()
+        ):
+            raise ValueError("missing/inapplicable verdicts require a one-line reason")
+        return self
+
 
 class ExtractedContent(BaseModel):
     summary: str

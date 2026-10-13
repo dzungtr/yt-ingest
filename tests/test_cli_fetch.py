@@ -390,3 +390,51 @@ def test_extract_command_writes_note_and_gems_file(tmp_path: Path) -> None:
             "rank": 1,
         }
     ]
+    # None report (e.g. multi-chunk, not yet verified) -> no audit artifact.
+    assert not (cfg.notes_dir / "dQw4w9WgXcQ.audit.md").exists()
+
+
+def test_extract_command_writes_audit_file_for_real_report(tmp_path: Path) -> None:
+    from yt_ingest.extract import VerifyReport
+    from yt_ingest.llm import CacheStats
+    from yt_ingest.models import Gem, GemType, Verdict, VerdictStatus
+
+    cfg = _mock_config(tmp_path)
+    cfg.notes_dir = tmp_path / "notes"
+    cfg.notes_dir.mkdir()
+    cache = _make_cache()
+    (cfg.transcripts_dir / "dQw4w9WgXcQ.json").write_text(cache.model_dump_json())
+
+    gem = Gem(
+        id="g001",
+        type=GemType.CAUSAL_LAW,
+        quote="Savings buildup leads to risk chasing.",
+        timestamp_start=61.0,
+        why="Core causal law.",
+        rank=1,
+    )
+    verdict = Verdict(
+        gem_id="g001",
+        verdict=VerdictStatus.MISSING,
+        reason="law absent from final note",
+        note_span="",
+    )
+    report = VerifyReport(initial=[verdict], final=[verdict])
+    stats = CacheStats(hit_tokens=5, miss_tokens=5, total_calls=1)
+
+    with (
+        patch("yt_ingest.cli.get_config", return_value=cfg),
+        patch(
+            "yt_ingest.cli.extract_from_cache",
+            return_value=("# Study Note", [gem], report, stats),
+        ),
+    ):
+        result = runner.invoke(app, ["extract"])
+
+    assert result.exit_code == 0
+    audit_file = cfg.notes_dir / "dQw4w9WgXcQ.audit.md"
+    assert audit_file.exists()
+    audit = audit_file.read_text()
+    assert "g001" in audit
+    assert "missing" in audit
+    assert "law absent from final note" in audit

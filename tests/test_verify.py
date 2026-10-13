@@ -7,13 +7,16 @@ slicing and the verdict parser.
 """
 
 from __future__ import annotations
+
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from yt_ingest.extract import (
+    VerifyReport,
     _parse_verdict,
     _transcript_excerpt,
     audit_path,
@@ -23,9 +26,11 @@ from yt_ingest.extract import (
 from yt_ingest.llm import CacheStats
 from yt_ingest.models import (
     Gem,
+    GemType,
     TranscriptCache,
     TranscriptSegment,
     TranscriptSource,
+    Verdict,
     VerdictStatus,
 )
 
@@ -94,11 +99,18 @@ _GEMS_PAYLOAD = {
     ]
 }
 
-_BLOG = "## Note\n\nSavings buildup leads to risk chasing. If the giants do not deliver, the pipeline becomes a drain."
+_BLOG = (
+    "## Note\n\nSavings buildup leads to risk chasing. "
+    "If the giants do not deliver, the pipeline becomes a drain."
+)
 
 
 def _covered(gem_id: str) -> dict[str, str]:
-    return {"verdict": "covered", "reason": "idea present in note", "note_span": "risk chasing"}
+    return {
+        "verdict": "covered",
+        "reason": "idea present in note",
+        "note_span": "risk chasing",
+    }
 
 
 def _run_extract(rounds: list[dict[str, dict[str, str]]], patched: str):
@@ -135,7 +147,9 @@ def _run_extract(rounds: list[dict[str, dict[str, str]]], patched: str):
 
 def test_all_covered_fires_no_patch() -> None:
     covered = {"g1": _covered("g1"), "g2": _covered("g2")}
-    result, gems, report, all_calls, verify_calls = _run_extract([covered], "SHOULD NOT BE USED")
+    result, gems, report, all_calls, verify_calls = _run_extract(
+        [covered], "SHOULD NOT BE USED"
+    )
 
     assert result == _BLOG  # note unchanged — no patch
     assert not report.patch_fired
@@ -188,7 +202,10 @@ def test_verify_user_includes_deterministic_transcript_excerpt() -> None:
 
 def test_missing_gem_fires_single_patch_then_full_reverify() -> None:
     rounds = [
-        {"g1": {"verdict": "missing", "reason": "law absent from note"}, "g2": _covered("g2")},
+        {
+            "g1": {"verdict": "missing", "reason": "law absent from note"},
+            "g2": _covered("g2"),
+        },
         {"g1": _covered("g1"), "g2": _covered("g2")},
     ]
     patched = _BLOG + "\n\nPatched addition."
@@ -227,7 +244,10 @@ def test_patch_receives_only_missing_gems_insert_only_rules() -> None:
 def test_residual_missing_recorded_after_reverify() -> None:
     rounds = [
         {"g1": {"verdict": "missing", "reason": "law absent"}, "g2": _covered("g2")},
-        {"g1": {"verdict": "missing", "reason": "still absent after patch"}, "g2": _covered("g2")},
+        {
+            "g1": {"verdict": "missing", "reason": "still absent after patch"},
+            "g2": _covered("g2"),
+        },
     ]
     _, gems, report, _, _ = _run_extract(rounds, "Patched.")
 
@@ -284,7 +304,10 @@ def test_audit_path_matches_persistence_contract() -> None:
 def test_audit_markdown_contains_verdicts_reasons_spans_history_residuals() -> None:
     rounds = [
         {"g1": {"verdict": "missing", "reason": "law absent"}, "g2": _covered("g2")},
-        {"g1": {"verdict": "missing", "reason": "still absent after patch"}, "g2": _covered("g2")},
+        {
+            "g1": {"verdict": "missing", "reason": "still absent after patch"},
+            "g2": _covered("g2"),
+        },
     ]
     _, gems, report, _, _ = _run_extract(rounds, "Patched.")
     audit = render_audit_md("dQw4w9WgXcQ", gems, report)
@@ -303,3 +326,73 @@ def test_audit_markdown_no_patch_history() -> None:
     _, gems, report, _, _ = _run_extract([covered], "")
     audit = render_audit_md("dQw4w9WgXcQ", gems, report)
     assert "no patch" in audit.lower()
+
+
+# --- audit table-cell escaping + verdict reason contract ---
+
+
+def test_audit_markdown_escapes_pipes_and_newlines_in_cells() -> None:
+    gem = Gem(
+        id="g001",
+        type=GemType.CAUSAL_LAW,
+        quote="Quote.",
+        timestamp_start=10.0,
+        why="why",
+        rank=1,
+    )
+    verdict = Verdict(
+        gem_id="g001",
+        verdict=VerdictStatus.INAPPLICABLE,
+        reason="channel | promo\nchatter",
+        note_span="",
+    )
+    report = VerifyReport(initial=[verdict], final=[verdict])
+
+    audit = render_audit_md("dQw4w9WgXcQ", [gem], report)
+
+    row = [ln for ln in audit.splitlines() if ln.startswith("| g001")][0]
+    # Raw pipe escaped so the cell does not split the table row.
+    assert "channel \\| promo chatter" in row
+    assert row.count("\\|") == 1
+    # Row structure stays a 5-column table (unescaped pipes only).
+    assert row.replace("\\|", "").count("|") == 6
+
+
+def test_verdict_parser_requires_reason_for_missing_and_inapplicable() -> None:
+    with pytest.raises(ValueError, match="one-line reason"):
+        _parse_verdict("g1", {"verdict": "missing", "reason": "", "note_span": ""})
+    with pytest.raises(ValueError, match="one-line reason"):
+        _parse_verdict(
+            "g1", {"verdict": "inapplicable", "reason": "   ", "note_span": ""}
+        )
+
+
+# --- multi-chunk path: no verification yet, no report ---
+
+
+def test_multi_chunk_returns_no_report_and_never_verifies() -> None:
+    def fake_chat_json(**kwargs: object) -> tuple[dict[str, Any], CacheStats]:
+        system = str(kwargs.get("system", ""))
+        stats = CacheStats(hit_tokens=1, miss_tokens=1, total_calls=1)
+        if "gem miner" in system:
+            return _GEMS_PAYLOAD, stats
+        if "gem verifier" in system:
+            raise AssertionError("multi-chunk path must not verify gems")
+        if "study-note writer" in system:
+            return {"blog_post": "draft"}, stats
+        assert "study-note editor" in system  # merge stage
+        return {"blog_post": "merged"}, stats
+
+    with (
+        patch(
+            "yt_ingest.extract._chunk_transcript", return_value=["a", "b"]
+        ),
+        patch("yt_ingest.extract.chat_json", side_effect=fake_chat_json),
+    ):
+        result, gems, report, _ = extract_from_cache(_make_cache())
+
+    assert result == "merged"
+    # No per-gem verification on multi-chunk yet (issue #19): report is None
+    # so the CLI writes no audit artifact for this unverified note.
+    assert report is None
+    assert [g.id for g in gems] == ["g001", "g002"]

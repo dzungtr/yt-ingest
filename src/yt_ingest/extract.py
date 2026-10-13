@@ -292,6 +292,15 @@ class VerifyReport:
     patch_fired: bool = False
 
 
+def _md_cell(text: str) -> str:
+    """Flatten a reason/note span into a safe single-line markdown table cell.
+
+    Pipes are escaped (they would split the cell) and newlines are collapsed
+    so a multi-line LLM reason cannot break the table structure.
+    """
+    return text.replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+
+
 def verify_and_patch_gems(
     cache: TranscriptCache, note: str, gems: list[Gem]
 ) -> tuple[str, VerifyReport, CacheStats]:
@@ -348,7 +357,7 @@ def render_audit_md(
         span = v.note_span or "—"
         lines.append(
             f"| {v.gem_id} | {gem.type.value} | {v.verdict.value} "
-            f"| {v.reason} | {span} |"
+            f"| {_md_cell(v.reason)} | {_md_cell(span)} |"
         )
 
     lines += ["", "## Retry history", ""]
@@ -414,7 +423,7 @@ def merge_gems(gem_lists: list[list[Gem]]) -> list[Gem]:
 
 def extract_from_cache(
     cache: TranscriptCache,
-) -> tuple[str, list[Gem], VerifyReport, CacheStats]:
+) -> tuple[str, list[Gem], VerifyReport | None, CacheStats]:
     """Transform a transcript into a study note via the gem pipeline.
 
     Per chunk: mine gems (S2 judgment), then write the draft with that
@@ -423,6 +432,8 @@ def extract_from_cache(
     then verified per gem and patched at most once (issue #18).
 
     Returns (blog_post_markdown, merged_gems, VerifyReport, CacheStats).
+    On the multi-chunk path verification is not wired yet (issue #19): the
+    report is None so no audit artifact is written for unverified notes.
     """
     chunks = _chunk_transcript(cache)
     drafts: list[str] = []
@@ -462,8 +473,10 @@ def extract_from_cache(
     )
     raw, stats = chat_json(system=_MERGE_PROMPT, user=combined)
     total_stats = total_stats.merge(stats)
-    report = VerifyReport(initial=[], final=[])
-    return raw.get("blog_post", "\n\n".join(drafts)), merged_gems, report, total_stats
+    # Multi-chunk: no per-gem verification yet (issue #19) — report stays None
+    # so the CLI skips the audit artifact instead of writing a false
+    # "everything covered" trail for an unverified note.
+    return raw.get("blog_post", "\n\n".join(drafts)), merged_gems, None, total_stats
 
 
 def _checksum(cache: TranscriptCache) -> str:
