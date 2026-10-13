@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class TranscriptSource(str, Enum):
@@ -69,6 +69,33 @@ class Gem(BaseModel):
     timestamp_start: float
     why: str
     rank: int
+
+
+class VerdictStatus(str, Enum):
+    """Per-gem verification verdicts (issue #18): covered / missing / inapplicable."""
+
+    COVERED = "covered"
+    MISSING = "missing"
+    INAPPLICABLE = "inapplicable"
+
+
+class Verdict(BaseModel):
+    """One gem's verification outcome against the finished note.
+
+    Covered verdicts must cite the note span where the gem's idea survives;
+    missing and inapplicable verdicts carry a one-line reason.
+    """
+
+    gem_id: str
+    verdict: VerdictStatus
+    reason: str
+    note_span: str = ""
+
+    @model_validator(mode="after")
+    def covered_requires_note_span(self) -> Verdict:
+        if self.verdict is VerdictStatus.COVERED and not self.note_span.strip():
+            raise ValueError("covered verdict must cite a note span")
+        return self
 
 
 class ExtractedContent(BaseModel):

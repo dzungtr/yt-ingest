@@ -212,7 +212,7 @@ def test_run_url_prints_study_note(tmp_path: Path) -> None:
         patch("yt_ingest.cli.run_fetcher_chain", return_value=cache),
         patch(
             "yt_ingest.cli.extract_from_cache",
-            return_value=("# Study Note", [], mock_stats),
+            return_value=("# Study Note", [], None, mock_stats),
         ),
     ):
         result = runner.invoke(app, ["run", "https://youtu.be/dQw4w9WgXcQ"])
@@ -250,7 +250,7 @@ def test_run_url_output_writes_study_note(tmp_path: Path) -> None:
         patch("yt_ingest.cli.run_fetcher_chain", return_value=cache),
         patch(
             "yt_ingest.cli.extract_from_cache",
-            return_value=("# Study Note", [], mock_stats),
+            return_value=("# Study Note", [], None, mock_stats),
         ),
     ):
         result = runner.invoke(
@@ -370,7 +370,7 @@ def test_extract_command_writes_note_and_gems_file(tmp_path: Path) -> None:
         patch("yt_ingest.cli.get_config", return_value=cfg),
         patch(
             "yt_ingest.cli.extract_from_cache",
-            return_value=("# Study Note", [gem], stats),
+            return_value=("# Study Note", [gem], None, stats),
         ),
     ):
         result = runner.invoke(app, ["extract"])

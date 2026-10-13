@@ -3,6 +3,7 @@ import difflib
 import hashlib
 import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ import tiktoken
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from yt_ingest.llm import CacheStats, chat_json
-from yt_ingest.models import Gem, TranscriptCache
+from yt_ingest.models import Gem, TranscriptCache, Verdict, VerdictStatus
 from yt_ingest.utils import seconds_to_mmss
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _CHUNK_TOKENS = 6_000
 _OVERLAP_TOKENS = 200
 _GEMS_PER_CHUNK_CAP = 12
+_EXCERPT_WINDOW_SECONDS = 60.0
 
 _DRAFT_PROMPT = """\
 You are a study-note writer. Transform the provided YouTube video transcript \
@@ -131,6 +133,40 @@ Return valid JSON:
 {"gems": [{"id": "g1", "type": "causal_law", "quote": "...", \
 "timestamp_start": 0.0, "why": "...", "rank": 1}]}"""
 
+_VERIFY_PROMPT = """\
+You are a gem verifier. You judge exactly one gem: did this gem's idea survive \
+into the finished study note? Judge content, not strings — a paraphrase that \
+conveys the same idea counts as covered; the near-verbatim quote need not \
+appear word-for-word. The provided transcript excerpt around the gem's \
+timestamp is the external anchor: judge the gem against the source material, \
+never against the note's own self-description.
+
+Verdicts:
+- covered: the gem's idea is present in the note. Cite the note span — a \
+short quote or section heading taken from the note itself — where it survives.
+- missing: the gem's idea is absent from the note.
+- inapplicable: the gem cannot apply to this note (for example the excerpt \
+shows the quote is channel chatter or outside the video's substance).
+
+Always give a one-line reason. Return valid JSON:
+{"verdict": "covered", "reason": "...", "note_span": "..."}
+
+note_span is required for covered; use "" for missing and inapplicable."""
+
+_PATCH_PROMPT = """\
+You are a study-note editor performing an insert-only patch. The user message \
+lists gems that were judged missing from the finished study note. Fold each \
+missing gem's idea into the note at its most useful location.
+
+Insert-only rules:
+- Do not alter, reword, or reorder any existing note text.
+- Do not lengthen the note: keep the total length at or below the original.
+- Convey each missing gem's idea faithfully — paraphrase is fine; the \
+near-verbatim quote need not appear word-for-word.
+- Do not mention gem, verification, or patch mechanics.
+
+Return valid JSON: {"blog_post": "patched study notes in markdown format"}"""
+
 
 def _encoding() -> tiktoken.Encoding:
     return tiktoken.get_encoding("cl100k_base")
@@ -178,6 +214,165 @@ def _parse_gems(raw: dict[str, Any]) -> list[Gem]:
     ]
 
 
+def _transcript_excerpt(cache: TranscriptCache, timestamp_start: float) -> str:
+    """Deterministic ±60s transcript excerpt around the gem's timestamp.
+
+    Code-sliced (never LLM-selected): every segment whose start falls inside
+    the closed window [ts-60, ts+60], in transcript order, as [mm:ss] lines.
+    """
+    lo = timestamp_start - _EXCERPT_WINDOW_SECONDS
+    hi = timestamp_start + _EXCERPT_WINDOW_SECONDS
+    lines = [
+        f"[{seconds_to_mmss(seg.start)}] {seg.text}"
+        for seg in cache.segments
+        if lo <= seg.start <= hi
+    ]
+    if not lines:
+        return "(no transcript content within ±60s of the gem timestamp)"
+    return "\n".join(lines)
+
+
+def _parse_verdict(gem_id: str, raw: dict[str, Any]) -> Verdict:
+    """Validate the verifier's output into a Verdict; failures stay fail-loud."""
+    try:
+        return Verdict.model_validate(
+            {
+                "gem_id": gem_id,
+                "verdict": raw.get("verdict"),
+                "reason": raw.get("reason", ""),
+                "note_span": raw.get("note_span", ""),
+            }
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"Verifier returned an invalid verdict for gem {gem_id}: {exc}"
+        ) from exc
+
+
+def _verify_user_message(note: str, gem: Gem, excerpt: str) -> str:
+    """Verify prompt body: stable note prefix first, per-gem tail last, so the
+    shared prefix (system + note block) hits provider prefix caching."""
+    return (
+        "Finished study note:\n\n"
+        f"{note}\n\n"
+        "---\n\n"
+        f"Gem to verify (id {gem.id}):\n"
+        f'- quote: "{gem.quote}"\n'
+        f"- why: {gem.why}\n"
+        f"- timestamp: {seconds_to_mmss(gem.timestamp_start)}\n\n"
+        "Transcript excerpt (±60s around the gem's timestamp):\n\n"
+        f"{excerpt}"
+    )
+
+
+def _verify_round(
+    cache: TranscriptCache, note: str, gems: list[Gem]
+) -> tuple[list[Verdict], CacheStats]:
+    """One independent LLM call per gem — never a batched gem list, so verdicts
+    cannot bias each other (CoVe-style)."""
+    verdicts: list[Verdict] = []
+    total_stats = CacheStats()
+    for gem in gems:
+        user = _verify_user_message(
+            note, gem, _transcript_excerpt(cache, gem.timestamp_start)
+        )
+        raw, stats = chat_json(system=_VERIFY_PROMPT, user=user)
+        total_stats = total_stats.merge(stats)
+        verdicts.append(_parse_verdict(gem.id, raw))
+    return verdicts, total_stats
+
+
+@dataclass
+class VerifyReport:
+    """Full verification audit trail for one video (issue #18)."""
+
+    initial: list[Verdict]
+    final: list[Verdict]
+    recheck: list[Verdict] = field(default_factory=list)
+    patch_fired: bool = False
+
+
+def verify_and_patch_gems(
+    cache: TranscriptCache, note: str, gems: list[Gem]
+) -> tuple[str, VerifyReport, CacheStats]:
+    """Verify every gem against the finished note; if any is missing, fire
+    exactly one insert-only patch and re-verify all gems once.
+
+    Inapplicable never triggers retry. Whatever remains missing or
+    inapplicable is recorded in the report, never silently dropped.
+
+    Returns (possibly patched note, VerifyReport, CacheStats).
+    """
+    initial, stats = _verify_round(cache, note, gems)
+    report = VerifyReport(initial=initial, final=initial)
+    missing_ids = {v.gem_id for v in initial if v.verdict is VerdictStatus.MISSING}
+    if not missing_ids:
+        return note, report, stats
+
+    missing = [g for g in gems if g.id in missing_ids]
+    user = (
+        "Finished study note:\n\n"
+        f"{note}\n\n"
+        "---\n\n"
+        "Missing gems to fold in (insert-only):\n\n"
+        + _gem_checklist(missing)
+    )
+    raw, patch_stats = chat_json(system=_PATCH_PROMPT, user=user)
+    stats = stats.merge(patch_stats)
+    patched_note = raw.get("blog_post", note)
+
+    recheck, recheck_stats = _verify_round(cache, patched_note, gems)
+    stats = stats.merge(recheck_stats)
+    report.patch_fired = True
+    report.recheck = recheck
+    report.final = recheck
+    return patched_note, report, stats
+
+
+def render_audit_md(
+    video_id: str, gems: list[Gem], report: VerifyReport
+) -> str:
+    """Render the audit artifact: verdict per gem, reasons, note spans, retry
+    history, and residuals — the honest, re-auditable loss trail."""
+    gem_by_id = {g.id: g for g in gems}
+    lines = [
+        f"# Verification audit — {video_id}",
+        "",
+        "## Verdicts (final)",
+        "",
+        "| gem | type | verdict | reason | note span |",
+        "|---|---|---|---|---|",
+    ]
+    for v in report.final:
+        gem = gem_by_id[v.gem_id]
+        span = v.note_span or "—"
+        lines.append(
+            f"| {v.gem_id} | {gem.type.value} | {v.verdict.value} "
+            f"| {v.reason} | {span} |"
+        )
+
+    lines += ["", "## Retry history", ""]
+    if report.patch_fired:
+        lines.append(
+            "- Patch fired (at least one gem missing); all gems re-verified once."
+        )
+        for v in report.initial:
+            lines.append(
+                f"- Initial verdict {v.gem_id}: {v.verdict.value} — {v.reason}"
+            )
+    else:
+        lines.append("- No patch fired (no gem was missing).")
+
+    lines += ["", "## Residuals", ""]
+    residuals = [v for v in report.final if v.verdict is not VerdictStatus.COVERED]
+    if residuals:
+        for v in residuals:
+            lines.append(f"- {v.gem_id}: {v.verdict.value} — {v.reason}")
+    else:
+        lines.append("- None. Every gem ended covered or reasoned-inapplicable.")
+    return "\n".join(lines) + "\n"
+
+
 def _gem_checklist(gems: list[Gem]) -> str:
     """Render the chunk's gems as the writer's must-include checklist."""
     lines = [
@@ -217,14 +412,17 @@ def merge_gems(gem_lists: list[list[Gem]]) -> list[Gem]:
     ]
 
 
-def extract_from_cache(cache: TranscriptCache) -> tuple[str, list[Gem], CacheStats]:
+def extract_from_cache(
+    cache: TranscriptCache,
+) -> tuple[str, list[Gem], VerifyReport, CacheStats]:
     """Transform a transcript into a study note via the gem pipeline.
 
     Per chunk: mine gems (S2 judgment), then write the draft with that
     chunk's gems as a must-include checklist (S1 execution). Gem lists are
-    merged deterministically.
+    merged deterministically. On the single-chunk path the finished note is
+    then verified per gem and patched at most once (issue #18).
 
-    Returns (blog_post_markdown, merged_gems, CacheStats).
+    Returns (blog_post_markdown, merged_gems, VerifyReport, CacheStats).
     """
     chunks = _chunk_transcript(cache)
     drafts: list[str] = []
@@ -250,14 +448,22 @@ def extract_from_cache(cache: TranscriptCache) -> tuple[str, list[Gem], CacheSta
     merged_gems = merge_gems(chunk_gems)
 
     if len(drafts) == 1:
-        return drafts[0], merged_gems, total_stats
+        # Single-chunk path: verify every gem against the finished note and
+        # apply the single bounded patch if needed (issue #18). Multi-chunk
+        # post-merge verification is wired by issue #19.
+        note, report, verify_stats = verify_and_patch_gems(
+            cache, drafts[0], merged_gems
+        )
+        total_stats = total_stats.merge(verify_stats)
+        return note, merged_gems, report, total_stats
 
     combined = "\n\n---\n\n".join(
         f"## Draft section {i + 1}\n\n{d}" for i, d in enumerate(drafts)
     )
     raw, stats = chat_json(system=_MERGE_PROMPT, user=combined)
     total_stats = total_stats.merge(stats)
-    return raw.get("blog_post", "\n\n".join(drafts)), merged_gems, total_stats
+    report = VerifyReport(initial=[], final=[])
+    return raw.get("blog_post", "\n\n".join(drafts)), merged_gems, report, total_stats
 
 
 def _checksum(cache: TranscriptCache) -> str:
@@ -295,3 +501,7 @@ def checksum_path(notes_dir: Path, video_id: str) -> Path:
 
 def gems_path(notes_dir: Path, video_id: str) -> Path:
     return notes_dir / f"{video_id}.gems.json"
+
+
+def audit_path(notes_dir: Path, video_id: str) -> Path:
+    return notes_dir / f"{video_id}.audit.md"
