@@ -61,15 +61,15 @@ flowchart TD
     V --> W[CLI ask command<br/><b>typer</b><br/>→ embed query → FAISS topK<br/>→ DeepSeek answer]
 ```
 
-Current model wiring (verified against `src/yt_ingest/llm.py`): models are
-resolved as provider-abstract tiers, not hard-coded names (ADR-0008):
+Current model wiring (verified against `src/yt_ingest/llm.py`): a single
+model is used everywhere, resolved per provider, not hard-coded names
+(ADR-0008 provider abstraction; ADR-0010 single-model):
 
-- `chat_json()` default tier `strong` — used for draft, merge, and `ask`.
-- Synthesis uses the `fast` tier.
-- OpenAI-compatible defaults: `deepseek-v4-pro` (strong) /
-  `deepseek-v4-flash` (fast). Anthropic defaults: `claude-sonnet-4-5` (strong)
-  / `claude-haiku-4-5` (fast). Overridable via `YT_INGEST_MODEL` /
-  `YT_INGEST_FAST_MODEL`.
+- `chat_json()` — used for draft, merge, synthesis, and `ask` — all run on
+  the one configured model.
+- OpenAI-compatible default: `deepseek-v4-pro`. Anthropic default:
+  `claude-sonnet-4-5`. Overridable via `YT_INGEST_MODEL`; explicit model
+  names pass through unchanged.
 - Synthesis output is written to `notes/synthesis.md` (not `_index.md`).
 
 ---
@@ -215,7 +215,7 @@ taking precedence.
 | `ANTHROPIC_API_KEY` | If no OpenAI key | Anthropic Messages API fallback (`anthropic` SDK; optional dependency `[anthropic]`). |
 | `DEEPSEEK_API_KEY` | Legacy | Still accepted: OpenAI-compatible with the DeepSeek base URL. |
 | `OPENAI_BASE_URL` | Optional | Override the OpenAI-compatible endpoint. |
-| `YT_INGEST_MODEL` / `YT_INGEST_FAST_MODEL` | Optional | Override the `strong` / `fast` model tiers (per-provider defaults apply otherwise). |
+| `YT_INGEST_MODEL` | Optional | Override the single LLM model (per-provider default applies otherwise). |
 | `HF_HOME` | Optional | Override HuggingFace cache location for embedding and Whisper models. |
 
 No YouTube Data API key, no Google OAuth, no Voyage/remote-embedding key.

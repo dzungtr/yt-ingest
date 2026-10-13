@@ -9,9 +9,9 @@ Two backends are supported, selected purely by environment-variable presence:
 2. **Anthropic-compatible**: the Anthropic Messages API. Enabled when
    ``ANTHROPIC_API_KEY`` is set (and no OpenAI-style key is present).
 
-Model selection uses two tiers (``strong`` / ``fast``) so prompts can ask for
-a cheap model without hard-coding provider-specific names. Per-provider
-defaults can be overridden with ``YT_INGEST_MODEL`` and ``YT_INGEST_FAST_MODEL``.
+Model selection uses a single model per provider (ADR-0010). Per-provider
+defaults can be overridden with ``YT_INGEST_MODEL``; explicit model names
+are passed through unchanged.
 """
 
 from __future__ import annotations
@@ -31,10 +31,8 @@ logger = logging.getLogger(__name__)
 
 _OPENAI_DEFAULT_BASE_URL = "https://api.deepseek.com"
 
-_OPENAI_DEFAULT_STRONG_MODEL = "deepseek-v4-pro"
-_OPENAI_DEFAULT_FAST_MODEL = "deepseek-v4-flash"
-_ANTHROPIC_DEFAULT_STRONG_MODEL = "claude-sonnet-4-5"
-_ANTHROPIC_DEFAULT_FAST_MODEL = "claude-haiku-4-5"
+_OPENAI_DEFAULT_MODEL = "deepseek-v4-pro"
+_ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-5"
 
 
 @dataclass
@@ -60,7 +58,7 @@ class LLMProvider(Protocol):
         *,
         system: str,
         user: str,
-        model_tier: str = "strong",
+        model: str | None = None,
         temperature: float = 0.0,
     ) -> tuple[Any, CacheStats]: ...
 
@@ -72,23 +70,22 @@ class OpenAICompatProvider:
         self,
         api_key: str,
         base_url: str,
-        strong_model: str,
-        fast_model: str,
+        model: str,
     ) -> None:
         self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
-        self._models = {"strong": strong_model, "fast": fast_model}
+        self._model = model
 
     def chat_json(
         self,
         *,
         system: str,
         user: str,
-        model_tier: str = "strong",
+        model: str | None = None,
         temperature: float = 0.0,
     ) -> tuple[Any, CacheStats]:
-        model = self._models.get(model_tier, model_tier)
+        resolved_model = model or self._model
         response = self._client.chat.completions.create(
-            model=model,
+            model=resolved_model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -113,7 +110,7 @@ class OpenAICompatProvider:
             "LLM cache: hit=%d miss=%d provider=openai-compat model=%s",
             stats.hit_tokens,
             stats.miss_tokens,
-            model,
+            resolved_model,
         )
 
         content = response.choices[0].message.content or ""
@@ -126,25 +123,25 @@ _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 class AnthropicProvider:
     """Anthropic Messages API (JSON extracted from plain-text response)."""
 
-    def __init__(self, api_key: str, strong_model: str, fast_model: str) -> None:
+    def __init__(self, api_key: str, model: str) -> None:
         import anthropic  # lazy: only needed when this provider is selected
 
         self._client = anthropic.Anthropic(api_key=api_key)
-        self._models = {"strong": strong_model, "fast": fast_model}
+        self._model = model
 
     def chat_json(
         self,
         *,
         system: str,
         user: str,
-        model_tier: str = "strong",
+        model: str | None = None,
         temperature: float = 0.0,
     ) -> tuple[Any, CacheStats]:
-        model = self._models.get(model_tier, model_tier)
+        resolved_model = model or self._model
         # Note: anthropic>=1.8 removed the `temperature` parameter; prompts here
         # rely on JSON-instruction discipline instead of sampling control.
         message = self._client.messages.create(
-            model=model,
+            model=resolved_model,
             max_tokens=8192,
             system=system,
             messages=[{"role": "user", "content": user}],
@@ -160,7 +157,7 @@ class AnthropicProvider:
             "LLM cache: hit=%d miss=%d provider=anthropic model=%s",
             stats.hit_tokens,
             stats.miss_tokens,
-            model,
+            resolved_model,
         )
 
         content = "".join(
@@ -176,24 +173,21 @@ class LLMConfigurationError(RuntimeError):
 
 def _select_provider() -> LLMProvider:
     cfg = get_config()
-    strong = os.environ.get("YT_INGEST_MODEL") or None
-    fast = os.environ.get("YT_INGEST_FAST_MODEL") or None
+    override = os.environ.get("YT_INGEST_MODEL") or None
 
     openai_key = cfg.openai_api_key
     if openai_key:
         return OpenAICompatProvider(
             api_key=openai_key,
             base_url=cfg.openai_base_url,
-            strong_model=strong or _OPENAI_DEFAULT_STRONG_MODEL,
-            fast_model=fast or _OPENAI_DEFAULT_FAST_MODEL,
+            model=override or _OPENAI_DEFAULT_MODEL,
         )
 
     anthropic_key = cfg.anthropic_api_key
     if anthropic_key:
         return AnthropicProvider(
             api_key=anthropic_key,
-            strong_model=strong or _ANTHROPIC_DEFAULT_STRONG_MODEL,
-            fast_model=fast or _ANTHROPIC_DEFAULT_FAST_MODEL,
+            model=override or _ANTHROPIC_DEFAULT_MODEL,
         )
 
     raise LLMConfigurationError(
@@ -224,15 +218,15 @@ def chat_json(
     *,
     system: str,
     user: str,
-    model: str = "strong",
+    model: str | None = None,
     temperature: float = 0.0,
 ) -> tuple[Any, CacheStats]:
     """
     Ask the configured LLM provider, parse JSON from the response.
 
-    ``model`` is a tier (``strong`` / ``fast``, resolved to a provider default
-    or ``YT_INGEST_MODEL`` / ``YT_INGEST_FAST_MODEL``) or an explicit model
-    name passed through as-is.
+    The single configured model (provider default or ``YT_INGEST_MODEL``
+    override) is used unless ``model`` names an explicit model, which is
+    passed through as-is.
 
     Returns (parsed_object, CacheStats).
     """
@@ -242,5 +236,5 @@ def chat_json(
             "No LLM provider configured. Set OPENAI_API_KEY or ANTHROPIC_API_KEY."
         )
     return _get_provider().chat_json(
-        system=system, user=user, model_tier=model, temperature=temperature
+        system=system, user=user, model=model, temperature=temperature
     )

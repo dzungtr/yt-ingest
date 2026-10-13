@@ -9,6 +9,13 @@ import yt_ingest.llm as llm_module
 from yt_ingest.llm import CacheStats, LLMConfigurationError, chat_json
 
 
+@pytest.fixture(autouse=True)
+def clean_model_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ambient YT_INGEST_* env vars out of the resolution tests."""
+    monkeypatch.delenv("YT_INGEST_MODEL", raising=False)
+    monkeypatch.delenv("YT_INGEST_FAST_MODEL", raising=False)
+
+
 def _make_openai_response(content: str, cached_tokens: int = 0, prompt_tokens: int = 100) -> MagicMock:
     prompt_details = MagicMock()
     prompt_details.cached_tokens = cached_tokens
@@ -110,7 +117,7 @@ def test_chat_json_returns_parsed_object(openai_cfg: MagicMock) -> None:
     assert mock_openai_cls.call_args.kwargs["base_url"] == "https://api.deepseek.com"
 
 
-def test_chat_json_model_tier_resolution(openai_cfg: MagicMock) -> None:
+def test_chat_json_single_model_resolution(openai_cfg: MagicMock) -> None:
     response = _make_openai_response(json.dumps({}))
 
     with (
@@ -121,9 +128,30 @@ def test_chat_json_model_tier_resolution(openai_cfg: MagicMock) -> None:
         mock_client.chat.completions.create.return_value = response
         mock_openai.return_value = mock_client
 
-        _, _ = chat_json(system="sys", user="usr", model="fast")
+        _, _ = chat_json(system="sys", user="usr")
 
-    assert mock_client.chat.completions.create.call_args.kwargs["model"] == "deepseek-v4-flash"
+    kwargs = mock_client.chat.completions.create.call_args.kwargs
+    assert kwargs["model"] == "deepseek-v4-pro"
+
+
+def test_chat_json_env_override(
+    openai_cfg: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = _make_openai_response(json.dumps({}))
+    monkeypatch.setenv("YT_INGEST_MODEL", "custom-model")
+
+    with (
+        patch("yt_ingest.llm.get_config", return_value=openai_cfg),
+        patch("openai.OpenAI") as mock_openai,
+    ):
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = response
+        mock_openai.return_value = mock_client
+
+        _, _ = chat_json(system="sys", user="usr")
+
+    kwargs = mock_client.chat.completions.create.call_args.kwargs
+    assert kwargs["model"] == "custom-model"
 
 
 def test_chat_json_explicit_model_passthrough(openai_cfg: MagicMock) -> None:
@@ -219,6 +247,7 @@ def test_anthropic_provider_basic(anthropic_cfg: MagicMock) -> None:
     assert result == {"answer": "hi"}
     assert stats.hit_tokens == 40
     assert stats.miss_tokens == 120
+    assert mock_client.messages.create.call_args.kwargs["model"] == "claude-sonnet-4-5"
 
 
 def test_anthropic_strips_code_fence(anthropic_cfg: MagicMock) -> None:

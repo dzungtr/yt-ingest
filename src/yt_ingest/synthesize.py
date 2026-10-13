@@ -47,7 +47,6 @@ def synthesize_notes(notes_dir: Path, index_dir: Path) -> tuple[str, CacheStats]
     raw, stats = chat_json(
         system=_SYSTEM_PROMPT,
         user=user_msg,
-        model="fast",
         temperature=0.0,
     )
 
