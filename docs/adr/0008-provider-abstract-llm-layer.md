@@ -3,7 +3,10 @@
 ## Status
 
 Accepted (supersedes the DeepSeek-only wiring of ADR-0002 for the transport
-layer; DeepSeek remains the default OpenAI-compatible endpoint).
+layer; DeepSeek remains the default OpenAI-compatible endpoint) — amended
+by ADR-0010: the strong/fast model-tier half of this decision is removed;
+the provider-abstraction half (env-var selection, OpenAI precedence,
+pass-through explicit models) survives unchanged.
 
 ## Context
 

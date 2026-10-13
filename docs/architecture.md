@@ -320,7 +320,14 @@ Historical decisions are in the ADR set at `docs/adr/`:
 - `docs/adr/0006-rule-driven-prompts-over-few-shot.md` — prompt strategy.
 - `docs/adr/0007-cli-invocation-modes.md` — batch / single-URL / agent faces.
 - `docs/adr/0008-provider-abstract-llm-layer.md` — OpenAI-compatible vs Anthropic LLM providers.
+- `docs/adr/0009-multi-stage-gem-preserving-extraction.md` — mine → write → verify pipeline (proposed; spec #15).
+- `docs/adr/0010-single-model-llm-layer.md` — single-model LLM layer, tiers removed (proposed; amends 0008).
 
 The ADRs capture **why**; this file captures **what**. The original
 superpowers specs (`docs/superpowers/specs/` and `docs/superpowers/plans/`)
 have been removed as part of this migration.
+
+> **Note:** ADR-0009 and ADR-0010 are **proposed** — implementation is
+> tracked in issues #16–#21 against spec #15. `docs/architecture.md`
+> describes the pipeline as it exists **today**; it will be updated by the
+> implementation slices, not this docs change.
