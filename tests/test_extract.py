@@ -1,15 +1,20 @@
 from __future__ import annotations
+import json
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 from yt_ingest.extract import (
     _checksum,
     _chunk_transcript,
     extract_from_cache,
+    gems_path,
     render_note,
 )
 from yt_ingest.llm import CacheStats
 from yt_ingest.models import (
+    Gem,
+    GemType,
     TranscriptCache,
     TranscriptSegment,
     TranscriptSource,
@@ -70,40 +75,173 @@ def test_render_note_includes_blog_post() -> None:
 
 # --- extract_from_cache ---
 
-def test_extract_from_cache_returns_blog_string() -> None:
+_GEMS_PAYLOAD = {
+    "gems": [
+        {
+            "id": "g1",
+            "type": "causal_law",
+            "quote": "Savings buildup leads to risk chasing.",
+            "timestamp_start": 61.0,
+            "why": "Core causal law.",
+            "rank": 1,
+        },
+        {
+            "id": "g2",
+            "type": "conditional_bet",
+            "quote": "If the giants do not deliver, the pipeline becomes a drain.",
+            "timestamp_start": 120.0,
+            "why": "Bet condition.",
+            "rank": 2,
+        },
+    ]
+}
+
+
+def _dispatch_mine_write(
+    mine_payload: dict[str, object], blog_text: str, stats: CacheStats
+):
+    """chat_json test double dispatching on the system prompt (mine vs write)."""
+
+    def fake_chat_json(**kwargs: object) -> tuple[dict[str, object], CacheStats]:
+        system = str(kwargs.get("system", ""))
+        if "gem miner" in system:
+            return mine_payload, stats
+        return {"blog_post": blog_text}, stats
+
+    return fake_chat_json
+
+
+def test_extract_from_cache_single_chunk_mines_then_writes() -> None:
     cache = _make_cache()
     stats = CacheStats(hit_tokens=50, miss_tokens=50, total_calls=1)
     blog_text = "## My Blog Post\n\nGreat content here."
+    calls: list[dict[str, object]] = []
 
-    with patch("yt_ingest.extract.chat_json", return_value=({"blog_post": blog_text}, stats)) as mock_llm:
-        result, result_stats = extract_from_cache(cache)
+    def fake_chat_json(**kwargs: object) -> tuple[dict[str, object], CacheStats]:
+        calls.append(dict(kwargs))
+        return _dispatch_mine_write(_GEMS_PAYLOAD, blog_text, stats)(**kwargs)
 
-    assert mock_llm.called
+    with patch("yt_ingest.extract.chat_json", side_effect=fake_chat_json):
+        result, gems, result_stats = extract_from_cache(cache)
+
     assert result == blog_text
-    assert result_stats.total_calls == 1
+    assert result_stats.total_calls == 2
+    assert len(calls) == 2
+    # Stage order: mine first, then gem-guided write.
+    assert "gem miner" in str(calls[0]["system"])
+    assert "study-note writer" in str(calls[1]["system"])
+    # Gem-guided writing: the writer sees the chunk's gems as a must-include checklist.
+    assert "MUST-INCLUDE" in str(calls[1]["user"])
+    assert "Savings buildup leads to risk chasing." in str(calls[1]["user"])
+    assert (
+        "If the giants do not deliver, the pipeline becomes a drain."
+        in str(calls[1]["user"])
+    )
+    # Merged gem list lands with ranks normalized.
+    assert [g.id for g in gems] == ["g001", "g002"]
+    assert [g.rank for g in gems] == [1, 2]
+    assert gems[0].type is GemType.CAUSAL_LAW
 
 
-def test_extract_from_cache_merges_multiple_chunks() -> None:
+def test_extract_from_cache_caps_gems_at_per_chunk_cap() -> None:
+    cache = _make_cache()
+    stats = CacheStats(total_calls=1)
+    blog_text = "blog"
+    big_payload = {
+        "gems": [
+            {
+                "id": f"g{i}",
+                "type": "other",
+                "quote": f"Gem number {i} quote.",
+                "timestamp_start": float(i) * 300.0,
+                "why": "why",
+                "rank": i,
+            }
+            for i in range(1, 16)  # 15 gems, above the cap
+        ]
+    }
+
+    with patch(
+        "yt_ingest.extract.chat_json",
+        side_effect=_dispatch_mine_write(big_payload, blog_text, stats),
+    ):
+        _, gems, _ = extract_from_cache(cache)
+
+    assert len(gems) == 12
+    assert [g.rank for g in gems] == list(range(1, 13))
+
+
+def test_extract_from_cache_merges_multiple_chunks_and_gems() -> None:
     cache = _make_cache()
     stats = CacheStats(hit_tokens=10, miss_tokens=10, total_calls=1)
     draft = "Draft content."
     merged = "## Merged Blog\n\nUnified content."
+    chunk2_payload = {
+        "gems": [
+            {
+                "id": "g1",
+                "type": "causal_law",
+                "quote": "Savings buildup leads to risk chasing.",
+                "timestamp_start": 65.0,
+                "why": "Core causal law.",
+                "rank": 1,
+            }
+        ]
+    }
 
-    call_count = 0
-
-    def fake_chat_json(**kwargs: object) -> tuple[dict[str, str], CacheStats]:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
+    def fake_chat_json(**kwargs: object) -> tuple[dict[str, object], CacheStats]:
+        system = str(kwargs.get("system", ""))
+        if "gem miner" in system:
+            user = str(kwargs.get("user", ""))
+            if "chunk 1/2" in user:
+                return _GEMS_PAYLOAD, stats
+            return chunk2_payload, stats
+        if "study-note writer" in system:
             return {"blog_post": draft}, stats
         return {"blog_post": merged}, stats
 
-    with patch("yt_ingest.extract._chunk_transcript", return_value=["chunk1", "chunk2"]):
-        with patch("yt_ingest.extract.chat_json", side_effect=fake_chat_json):
-            result, _ = extract_from_cache(cache)
+    with (
+        patch(
+            "yt_ingest.extract._chunk_transcript", return_value=["chunk1", "chunk2"]
+        ),
+        patch("yt_ingest.extract.chat_json", side_effect=fake_chat_json),
+    ):
+        result, gems, _ = extract_from_cache(cache)
 
-    assert call_count == 3  # 2 chunk calls + 1 merge call
     assert result == merged
+    # 2 chunks x (mine + write) + 1 merge call
+    # Overlapping-chunk duplicate gem deduped deterministically (no LLM).
+    assert [g.quote for g in gems] == [
+        "Savings buildup leads to risk chasing.",
+        "If the giants do not deliver, the pipeline becomes a drain.",
+    ]
+    assert [g.rank for g in gems] == [1, 2]
+
+
+# --- gems artifact paths ---
+
+def test_gems_path_matches_persistence_contract() -> None:
+    assert gems_path(Path("notes"), "dQw4w9WgXcQ") == (
+        Path("notes") / "dQw4w9WgXcQ.gems.json"
+    )
+
+
+def test_gems_file_serializes_schema(tmp_path: Path) -> None:
+    gems = [
+        Gem(
+            id="g001",
+            type=GemType.DEFINITIONAL_ASIDE,
+            quote="Rare earths are a group of metals.",
+            timestamp_start=45.0,
+            why="Sets up the refining argument.",
+            rank=1,
+        )
+    ]
+    out = tmp_path / "dQw4w9WgXcQ.gems.json"
+    out.write_text(json.dumps([g.model_dump(mode="json") for g in gems], indent=2))
+
+    loaded = [Gem.model_validate(item) for item in json.loads(out.read_text())]
+    assert loaded == gems
 
 
 # --- _checksum ---

@@ -44,6 +44,33 @@ class WorthRewatching(BaseModel):
     reason: str
 
 
+class GemType(str, Enum):
+    """The audit's five hidden-gem loss classes plus `other` (ADR-0009).
+
+    Metadata only: no pipeline stage may branch on the type; it exists for
+    per-loss-class retention metrics and taxonomy growth.
+    """
+
+    CAUSAL_LAW = "causal_law"
+    CONDITIONAL_BET = "conditional_bet"
+    DEFINITIONAL_ASIDE = "definitional_aside"
+    EMBEDDED_QUOTE = "embedded_quote"
+    CLOSING_PREDICTION = "closing_prediction"
+    OTHER = "other"
+
+
+class Gem(BaseModel):
+    """A near-verbatim, timestamped transcript fragment that must survive
+    into the study note (the gem data contract consumed by tickets 3-6)."""
+
+    id: str
+    type: GemType
+    quote: str
+    timestamp_start: float
+    why: str
+    rank: int
+
+
 class ExtractedContent(BaseModel):
     summary: str
     key_claims: list[KeyClaim]
