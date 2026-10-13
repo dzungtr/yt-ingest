@@ -66,6 +66,14 @@ These rules live in the extraction prompt (see `src/yt_ingest/extract.py`)
 rather than in configuration, because changing them is infrequent and the
 prompt is where they have to be to take effect.
 
+> **ADR-0009 amendment:** the keep-rules are now additionally enforced
+> structurally: a mining pass extracts "gems" per chunk, the writer must
+> include them, and a verification loop checks every gem survived into the
+> finished note. The rules above remain the prompt-side expression of the
+> same policy; the gem type taxonomy (causal laws, conditionals,
+> definitional asides, embedded quotes, closing predictions) grew out of
+> auditing which keep-rules a single pass could not uphold.
+
 ## Consequences
 
 - **The reader gets a consistent shape** regardless of video topic.

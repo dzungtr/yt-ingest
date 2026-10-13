@@ -2,7 +2,9 @@
 
 ## Status
 
-**Accepted**
+**Accepted** — the two-pass escalation clause below was realized by
+ADR-0009 (multi-stage mine → write → verify). The rule-driven prompt
+strategy itself survives; the single-pass compression assumption does not.
 
 ## Context
 
@@ -54,6 +56,15 @@ the explicit strip rules, the next iteration escalates to a separate
 two-pass design rather than attempting to patch the single prompt further.
 The decision to escalate rather than tweak is made per batch of ~5 real
 outputs, not per video.
+
+> **ADR-0009 realization:** the escalation fired, but in a different shape
+> than draft-then-compress. A 2026-10-13 claim-by-claim audit (2 videos,
+> 50%/61% density vs the 20-30% target, five loss classes of "hidden
+> gems", run-to-run nondeterministic retention) showed the problem was
+> not length but *loss* — one prompt doing judgment (S2) and
+> compression-writing (S1) in a single pass. The realized design splits
+> the judgment into a mining pass and keeps the rule-driven prompts for
+> writing, with per-gem verification closing the loop.
 
 **The `"blog_post"` JSON key is preserved** despite its name no longer
 matching the "study note" framing. The key is a label, not a contract:
