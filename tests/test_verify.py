@@ -367,19 +367,26 @@ def test_verdict_parser_requires_reason_for_missing_and_inapplicable() -> None:
         )
 
 
-# --- multi-chunk path: no verification yet, no report ---
+# --- multi-chunk path: verification now runs against the merged note ---
 
 
-def test_multi_chunk_returns_no_report_and_never_verifies() -> None:
+def test_multi_chunk_verifies_merged_note_and_returns_report() -> None:
+    """Issue #19: post-merge verification covers both writer-loss and
+    merge-loss with one verify + patch + re-verify budget per video."""
+
     def fake_chat_json(**kwargs: object) -> tuple[dict[str, Any], CacheStats]:
         system = str(kwargs.get("system", ""))
         stats = CacheStats(hit_tokens=1, miss_tokens=1, total_calls=1)
         if "gem miner" in system:
             return _GEMS_PAYLOAD, stats
-        if "gem verifier" in system:
-            raise AssertionError("multi-chunk path must not verify gems")
         if "study-note writer" in system:
             return {"blog_post": "draft"}, stats
+        if "gem verifier" in system:
+            return {
+                "verdict": "covered",
+                "reason": "present",
+                "note_span": "merged",
+            }, stats
         assert "study-note editor" in system  # merge stage
         return {"blog_post": "merged"}, stats
 
@@ -392,7 +399,11 @@ def test_multi_chunk_returns_no_report_and_never_verifies() -> None:
         result, gems, report, _ = extract_from_cache(_make_cache())
 
     assert result == "merged"
-    # No per-gem verification on multi-chunk yet (issue #19): report is None
-    # so the CLI writes no audit artifact for this unverified note.
-    assert report is None
+    assert report is not None
+    assert not report.patch_fired
+    assert [v.gem_id for v in report.final] == ["g001", "g002"]
+    assert [v.verdict for v in report.final] == [
+        VerdictStatus.COVERED,
+        VerdictStatus.COVERED,
+    ]
     assert [g.id for g in gems] == ["g001", "g002"]

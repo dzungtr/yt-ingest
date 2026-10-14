@@ -237,6 +237,66 @@ def test_merge_gems_deterministic_for_same_input() -> None:
     assert merge_gems(chunks) == merge_gems(chunks)
 
 
+def test_merge_gems_merges_rank_taking_the_best_on_collapse() -> None:
+    chunk1 = [
+        _gem(
+            id="a",
+            quote="The tariff trigger is 67 percent.",
+            timestamp_start=200.0,
+            why="Named trigger.",
+            rank=2,
+        )
+    ]
+    chunk2 = [
+        _gem(
+            id="b",
+            quote="The tariff trigger is 67 percent.",
+            timestamp_start=205.0,
+            why="Named trigger.",
+            rank=1,
+        )
+    ]
+
+    merged = merge_gems([chunk1, chunk2])
+
+    assert len(merged) == 1
+    assert merged[0].rank == 1
+
+
+def test_merge_gems_merges_distinct_whys_on_collapse() -> None:
+    chunk1 = [
+        _gem(
+            id="a",
+            quote="The tariff trigger is 67 percent.",
+            timestamp_start=200.0,
+            why="Named trigger.",
+        )
+    ]
+    chunk2 = [
+        _gem(
+            id="b",
+            quote="The tariff trigger is 67 percent.",
+            timestamp_start=205.0,
+            why="Carries the causal anchor.",
+        )
+    ]
+
+    merged = merge_gems([chunk1, chunk2])
+
+    assert len(merged) == 1
+    assert merged[0].why == "Named trigger.; Carries the causal anchor."
+
+
+def test_merge_gems_keeps_single_why_when_identical_on_collapse() -> None:
+    chunk1 = [_gem(id="a", timestamp_start=200.0, why="Named trigger.")]
+    chunk2 = [_gem(id="b", timestamp_start=205.0, why="Named trigger.")]
+
+    merged = merge_gems([chunk1, chunk2])
+
+    assert len(merged) == 1
+    assert merged[0].why == "Named trigger."
+
+
 def test_merge_gems_handles_empty_input() -> None:
     assert merge_gems([]) == []
     assert merge_gems([[], []]) == []

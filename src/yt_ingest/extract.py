@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import difflib
 import hashlib
 import logging
@@ -406,13 +407,30 @@ def _same_gem(a: Gem, b: Gem) -> bool:
     return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.85
 
 
+def _merge_duplicate(kept: Gem, dup: Gem) -> Gem:
+    """Deterministically fold a near-duplicate into the kept gem (issue #19):
+    rank keeps the best (lowest) of the two; distinct whys are joined in
+    encounter order so the merged gem carries every chunk's rationale."""
+    rank = min(kept.rank, dup.rank)
+    if _normalized_quote(kept.why) == _normalized_quote(dup.why):
+        why = kept.why
+    else:
+        why = f"{kept.why}; {dup.why}"
+    return kept.model_copy(update={"rank": rank, "why": why})
+
+
 def merge_gems(gem_lists: list[list[Gem]]) -> list[Gem]:
     """Deterministic gem merge: dedupe near-duplicates across chunk lists
-    (no LLM), then reassign ids/ranks 1..n in stable rank order."""
+    (no LLM), merging why/rank on collapse, then reassign ids/ranks 1..n in
+    stable rank order."""
     merged: list[Gem] = []
     for gems in gem_lists:
         for gem in gems:
-            if not any(_same_gem(gem, kept) for kept in merged):
+            for idx, kept in enumerate(merged):
+                if _same_gem(gem, kept):
+                    merged[idx] = _merge_duplicate(kept, gem)
+                    break
+            else:
                 merged.append(gem)
     merged.sort(key=lambda g: g.rank)
     return [
@@ -423,17 +441,19 @@ def merge_gems(gem_lists: list[list[Gem]]) -> list[Gem]:
 
 def extract_from_cache(
     cache: TranscriptCache,
-) -> tuple[str, list[Gem], VerifyReport | None, CacheStats]:
+) -> tuple[str, list[Gem], VerifyReport, CacheStats]:
     """Transform a transcript into a study note via the gem pipeline.
 
     Per chunk: mine gems (S2 judgment), then write the draft with that
-    chunk's gems as a must-include checklist (S1 execution). Gem lists are
-    merged deterministically. On the single-chunk path the finished note is
-    then verified per gem and patched at most once (issue #18).
+    chunk's gems as a must-include checklist (S1 execution) — writing stays
+    locally grounded, seeing only its own chunk and that chunk's gems.
+    Gem lists are merged deterministically and drafts via the merge stage.
+    Verification then runs against the merged note — the point where text can
+    no longer change — covering both writer-loss and merge-loss with one
+    retry budget: one insert-only patch + one re-verify per video (issues
+    #18 and #19).
 
     Returns (blog_post_markdown, merged_gems, VerifyReport, CacheStats).
-    On the multi-chunk path verification is not wired yet (issue #19): the
-    report is None so no audit artifact is written for unverified notes.
     """
     chunks = _chunk_transcript(cache)
     drafts: list[str] = []
@@ -459,24 +479,22 @@ def extract_from_cache(
     merged_gems = merge_gems(chunk_gems)
 
     if len(drafts) == 1:
-        # Single-chunk path: verify every gem against the finished note and
-        # apply the single bounded patch if needed (issue #18). Multi-chunk
-        # post-merge verification is wired by issue #19.
-        note, report, verify_stats = verify_and_patch_gems(
-            cache, drafts[0], merged_gems
+        # Single chunk: no merge stage needed — the draft is already final.
+        note = drafts[0]
+    else:
+        combined = "\n\n---\n\n".join(
+            f"## Draft section {i + 1}\n\n{d}" for i, d in enumerate(drafts)
         )
-        total_stats = total_stats.merge(verify_stats)
-        return note, merged_gems, report, total_stats
+        raw, stats = chat_json(system=_MERGE_PROMPT, user=combined)
+        total_stats = total_stats.merge(stats)
+        note = raw.get("blog_post", "\n\n".join(drafts))
 
-    combined = "\n\n---\n\n".join(
-        f"## Draft section {i + 1}\n\n{d}" for i, d in enumerate(drafts)
-    )
-    raw, stats = chat_json(system=_MERGE_PROMPT, user=combined)
-    total_stats = total_stats.merge(stats)
-    # Multi-chunk: no per-gem verification yet (issue #19) — report stays None
-    # so the CLI skips the audit artifact instead of writing a false
-    # "everything covered" trail for an unverified note.
-    return raw.get("blog_post", "\n\n".join(drafts)), merged_gems, None, total_stats
+    # Post-merge verification (issue #19): the merged note is the point where
+    # text can no longer change, so one verify + patch + re-verify budget
+    # covers both writer-loss and merge-loss for the whole video.
+    note, report, verify_stats = verify_and_patch_gems(cache, note, merged_gems)
+    total_stats = total_stats.merge(verify_stats)
+    return note, merged_gems, report, total_stats
 
 
 def _checksum(cache: TranscriptCache) -> str:
