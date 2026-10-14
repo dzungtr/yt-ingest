@@ -4,8 +4,10 @@ A CLI tool that fetches YouTube transcripts, extracts structured notes with Deep
 
 ## Setup
 
+Base install covers the fetch+extract path. Extras: `[whisper]`, `[retrieval]`, `[cli]`, `[server]`, or `[full]` (cli + whisper + retrieval) for today's complete install.
+
 ```bash
-pip install -e .
+pip install -e ".[dev,full]"
 cp .env.example .env        # then add DEEPSEEK_API_KEY
 ```
 
@@ -68,7 +70,7 @@ Each fetcher is tried in order; the first success wins.
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,full]"
 pytest
 mypy --strict src
 ```

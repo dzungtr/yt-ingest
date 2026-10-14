@@ -153,7 +153,8 @@ def fetch(
             raise typer.Exit(1)
         return
 
-    # --- Single URL mode ---
+    # --- Single URL mode (url is guaranteed non-None here: both-None exited above) ---
+    assert url is not None
     try:
         video_id = extract_video_id(url)
     except ValueError as exc:
@@ -326,7 +327,8 @@ def run(
         synthesize()
         return
 
-    # --- Single URL mode ---
+    # --- Single URL mode (url is guaranteed non-None here: both-None exited above) ---
+    assert url is not None
     cfg = get_config()
 
     try:

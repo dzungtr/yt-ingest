@@ -10,21 +10,36 @@ dependencies = [
     "youtube-transcript-api>=0.6",
     "yt-dlp>=2024.1",
     "webvtt-py>=0.4",
-    "faster-whisper>=1.0",
     "openai>=1.30",
     "tiktoken>=0.7",
     "pydantic>=2.0",
     "jinja2>=3.1",
-    "typer>=0.12",
-    "sentence-transformers>=3.0",
-    "faiss-cpu>=1.8",
-    "langchain-text-splitters>=0.2",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
-    "rich>=13.0",
 ]
 
 [project.optional-dependencies]
+whisper = [
+    "faster-whisper>=1.0",
+]
+retrieval = [
+    "sentence-transformers>=3.0",
+    "faiss-cpu>=1.8",
+    "langchain-text-splitters>=0.2",
+]
+cli = [
+    "typer>=0.12",
+    "rich>=13.0",
+]
+server = [
+    "fastmcp>=2.0",
+    "uvicorn>=0.30",
+]
+full = [
+    "yt-ingest[cli]",
+    "yt-ingest[whisper]",
+    "yt-ingest[retrieval]",
+]
 dev = [
     "pytest>=8.0",
     "pytest-mock>=3.14",
@@ -36,6 +51,7 @@ anthropic = [
     "anthropic>=0.40",
 ]
 
+# CLI face: console script lives under the `[cli]` extra's packages.
 [project.scripts]
 yt-ingest = "yt_ingest.cli:app"
 
