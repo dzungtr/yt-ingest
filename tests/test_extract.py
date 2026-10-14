@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from yt_ingest.models import (
     TranscriptCache,
     TranscriptSegment,
     TranscriptSource,
+    VerdictStatus,
 )
 
 
@@ -201,6 +203,12 @@ def test_extract_from_cache_merges_multiple_chunks_and_gems() -> None:
             return chunk2_payload, stats
         if "study-note writer" in system:
             return {"blog_post": draft}, stats
+        if "gem verifier" in system:
+            return {
+                "verdict": "covered",
+                "reason": "present",
+                "note_span": "Unified content.",
+            }, stats
         return {"blog_post": merged}, stats
 
     with (
@@ -209,16 +217,246 @@ def test_extract_from_cache_merges_multiple_chunks_and_gems() -> None:
         ),
         patch("yt_ingest.extract.chat_json", side_effect=fake_chat_json),
     ):
-        result, gems, _report, _ = extract_from_cache(cache)
+        result, gems, report, _ = extract_from_cache(cache)
 
     assert result == merged
-    # 2 chunks x (mine + write) + 1 merge call
     # Overlapping-chunk duplicate gem deduped deterministically (no LLM).
     assert [g.quote for g in gems] == [
         "Savings buildup leads to risk chasing.",
         "If the giants do not deliver, the pipeline becomes a drain.",
     ]
     assert [g.rank for g in gems] == [1, 2]
+    # Post-merge verification runs against the merged note (issue #19).
+    assert report is not None
+    assert not report.patch_fired
+    assert all(v.verdict is VerdictStatus.COVERED for v in report.final)
+
+
+def _dispatch_multi_chunk(
+    gem_payloads: dict[int, dict[str, object]],
+    draft: str,
+    merged: str,
+    verdicts: dict[str, tuple[dict[str, object], ...]],
+    stats: CacheStats,
+    patched: str = "",
+):
+    """chat_json test double for the multi-chunk flow, dispatching on the
+    system prompt (mine / write / merge / verify / patch).
+
+    verdicts maps gem id -> tuple of (payload, stats) verdicts returned in
+    verify-round order, so the same double serves initial and re-verify rounds.
+    """
+    verify_rounds: dict[str, list[tuple[dict[str, object], CacheStats]]] = {
+        gem_id: [(payload, stats) for payload in payloads]
+        for gem_id, payloads in verdicts.items()
+    }
+
+    def fake_chat_json(**kwargs: object) -> tuple[dict[str, object], CacheStats]:
+        system = str(kwargs.get("system", ""))
+        if "gem miner" in system:
+            user = str(kwargs.get("user", ""))
+            if "chunk 1/2" in user:
+                return gem_payloads[1], stats
+            return gem_payloads[2], stats
+        if "study-note writer" in system:
+            return {"blog_post": draft}, stats
+        if "gem verifier" in system:
+            user = str(kwargs.get("user", ""))
+            for gem_id, round_calls in verify_rounds.items():
+                if f"id {gem_id}" in user and round_calls:
+                    return round_calls.pop(0)
+            # Default: covered (used when no verdict rounds are scripted).
+            return {
+                "verdict": "covered",
+                "reason": "present",
+                "note_span": "Unified content.",
+            }, stats
+        if "insert-only patch" in system:
+            return {"blog_post": patched or merged + " patched"}, stats
+        return {"blog_post": merged}, stats
+
+    return fake_chat_json
+
+
+def test_extract_from_cache_multi_chunk_all_covered_no_patch() -> None:
+    cache = _make_cache()
+    stats = CacheStats(hit_tokens=10, miss_tokens=10, total_calls=1)
+    calls: list[dict[str, object]] = []
+    fake = _dispatch_multi_chunk(
+        {1: _GEMS_PAYLOAD, 2: {"gems": []}},
+        "Draft content.",
+        "## Merged Blog\n\nUnified content.",
+        {},
+        stats,
+    )
+
+    def wrapper(**kwargs: object) -> tuple[dict[str, object], CacheStats]:
+        calls.append(dict(kwargs))
+        return fake(**kwargs)
+
+    with (
+        patch(
+            "yt_ingest.extract._chunk_transcript", return_value=["chunk1", "chunk2"]
+        ),
+        patch("yt_ingest.extract.chat_json", side_effect=wrapper),
+    ):
+        result, gems, report, _ = extract_from_cache(cache)
+
+    # Stage order: mine, write, mine, write, merge, verify x gems — no patch.
+    assert "gem miner" in str(calls[0]["system"])
+    assert "study-note writer" in str(calls[1]["system"])
+    assert "gem miner" in str(calls[2]["system"])
+    assert "study-note writer" in str(calls[3]["system"])
+    assert "editor" in str(calls[4]["system"])
+    assert all("gem verifier" in str(c["system"]) for c in calls[5:])
+    assert len(calls) == 7  # 2 mine + 2 write + 1 merge + 2 verify
+    assert result == "## Merged Blog\n\nUnified content."
+    assert report is not None
+    assert not report.patch_fired
+    assert [v.gem_id for v in report.final] == ["g001", "g002"]
+    assert [g.id for g in gems] == ["g001", "g002"]
+
+
+def test_extract_from_cache_multi_chunk_writer_stays_locally_grounded() -> None:
+    """Each writer call sees only its own chunk and that chunk's gem checklist."""
+    cache = _make_cache()
+    stats = CacheStats(total_calls=1)
+    write_users: list[str] = []
+    fake = _dispatch_multi_chunk(
+        {1: _GEMS_PAYLOAD, 2: {"gems": []}},
+        "Draft content.",
+        "Merged.",
+        {},
+        stats,
+    )
+
+    def wrapper(**kwargs: object) -> tuple[dict[str, object], CacheStats]:
+        if "study-note writer" in str(kwargs.get("system", "")):
+            write_users.append(str(kwargs.get("user", "")))
+        return fake(**kwargs)
+
+    with (
+        patch(
+            "yt_ingest.extract._chunk_transcript",
+            return_value=["chunk one text", "chunk two text"],
+        ),
+        patch("yt_ingest.extract.chat_json", side_effect=wrapper),
+    ):
+        extract_from_cache(cache)
+
+    assert len(write_users) == 2
+    assert "chunk 1/2" in write_users[0] and "chunk one text" in write_users[0]
+    assert "chunk two text" not in write_users[0]
+    assert "MUST-INCLUDE" in write_users[0]
+    assert "Savings buildup leads to risk chasing." in write_users[0]
+    assert "chunk 2/2" in write_users[1] and "chunk two text" in write_users[1]
+    assert "chunk one text" not in write_users[1]
+    assert "Savings buildup leads to risk chasing." not in write_users[1]
+
+
+def test_extract_from_cache_multi_chunk_missing_fires_single_patch() -> None:
+    """Verify the merged note -> one gem missing -> one patch -> re-verify all
+    gems once. One retry budget for the whole video (issue #19)."""
+    cache = _make_cache()
+    stats = CacheStats(total_calls=1)
+    patched = "## Merged Blog\n\nUnified content. Plus the missing idea."
+    calls: list[dict[str, object]] = []
+    fake = _dispatch_multi_chunk(
+        {1: _GEMS_PAYLOAD, 2: {"gems": []}},
+        "Draft content.",
+        "## Merged Blog\n\nUnified content.",
+        {
+            "g001": (
+                {"verdict": "missing", "reason": "not in note", "note_span": ""},
+                {
+                    "verdict": "covered",
+                    "reason": "folded in",
+                    "note_span": "Plus the missing idea.",
+                },
+            ),
+            "g002": (
+                {
+                    "verdict": "covered",
+                    "reason": "present",
+                    "note_span": "Unified content.",
+                },
+                {
+                    "verdict": "covered",
+                    "reason": "still present",
+                    "note_span": "Unified content.",
+                },
+            ),
+        },
+        stats,
+        patched=patched,
+    )
+
+    def wrapper(**kwargs: object) -> tuple[dict[str, object], CacheStats]:
+        calls.append(dict(kwargs))
+        return fake(**kwargs)
+
+    with (
+        patch(
+            "yt_ingest.extract._chunk_transcript", return_value=["chunk1", "chunk2"]
+        ),
+        patch("yt_ingest.extract.chat_json", side_effect=wrapper),
+    ):
+        result, _gems, report, _ = extract_from_cache(cache)
+
+    assert result == patched
+    assert report is not None
+    assert report.patch_fired
+    assert [v.verdict for v in report.final] == [
+        VerdictStatus.COVERED,
+        VerdictStatus.COVERED,
+    ]
+    # 2 mine + 2 write + 1 merge + 2 verify + 1 patch + 2 re-verify.
+    assert len(calls) == 10
+    patch_calls = [c for c in calls if "insert-only patch" in str(c["system"])]
+    assert len(patch_calls) == 1
+    # The patch prompt receives the merged note and the missing gem only.
+    assert "## Merged Blog" in str(patch_calls[0]["user"])
+    assert "g002" not in str(patch_calls[0]["user"])
+
+
+def test_extract_from_cache_multi_chunk_end_to_end_over_6k_tokens() -> None:
+    """Real chunking on a >6k-token transcript: mine x2 -> write x2 ->
+    gem-merge -> draft-merge -> verify x2 -> no patch (all covered)."""
+    cache = _make_cache(n_segments=50)
+    # ~140 tokens per line, so 50 segments (~7k tokens) split into 2 chunks.
+    filler = "the speaker explains the mechanism in careful detail step by step " * 12
+    cache = cache.model_copy(
+        update={
+            "segments": [
+                seg.model_copy(update={"text": filler}) for seg in cache.segments
+            ]
+        }
+    )
+    stats = CacheStats(total_calls=1)
+    systems: list[str] = []
+    fake = _dispatch_multi_chunk(
+        {1: _GEMS_PAYLOAD, 2: {"gems": []}},
+        "Draft content.",
+        "## Merged Blog\n\nUnified content.",
+        {},
+        stats,
+    )
+
+    def wrapper(**kwargs: object) -> tuple[dict[str, object], CacheStats]:
+        systems.append(str(kwargs.get("system", "")))
+        return fake(**kwargs)
+
+    with patch("yt_ingest.extract.chat_json", side_effect=wrapper):
+        result, gems, report, _ = extract_from_cache(cache)
+
+    assert result == "## Merged Blog\n\nUnified content."
+    assert [g.id for g in gems] == ["g001", "g002"]
+    assert report is not None and not report.patch_fired
+    mine = [s for s in systems if "gem miner" in s]
+    write = [s for s in systems if "study-note writer" in s]
+    verify = [s for s in systems if "gem verifier" in s]
+    merge = [s for s in systems if "study-note editor" in s]
+    assert len(mine) == 2 and len(write) == 2 and len(verify) == 2 and len(merge) == 1
 
 
 # --- gems artifact paths ---
