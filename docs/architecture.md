@@ -322,6 +322,7 @@ Historical decisions are in the ADR set at `docs/adr/`:
 - `docs/adr/0008-provider-abstract-llm-layer.md` — OpenAI-compatible vs Anthropic LLM providers.
 - `docs/adr/0009-multi-stage-gem-preserving-extraction.md` — mine → write → verify pipeline (proposed; spec #15).
 - `docs/adr/0010-single-model-llm-layer.md` — single-model LLM layer, tiers removed (proposed; amends 0008).
+- `docs/adr/0011-mcp-server-face.md` — MCP server face superseding 0004's deployment boundary (proposed; spec #26).
 
 The ADRs capture **why**; this file captures **what**. The original
 superpowers specs (`docs/superpowers/specs/` and `docs/superpowers/plans/`)

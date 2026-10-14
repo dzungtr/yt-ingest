@@ -27,3 +27,13 @@
 **Patch** — The single insert-only repair that folds missing gems into the finished note without lengthening it.
 
 **Persistence report** — The per-video record of every gem verdict, reason, and retry outcome. _Avoid_: audit log.
+
+## Server face
+
+**Server mode** — The MCP server face of yt-ingest: a single-tool FastMCP server (`write_study_note(url)`) exposing the CLI's fetch + extraction pipeline over streamable-HTTP. Deployed stateless on the homelab cluster; the CLI remains the primary product. _Avoid_: API, web service, backend.
+
+**`write_study_note`** — The one and only server tool: video URL in, rendered study note out. Wraps the in-memory path one function deep; quality tracks `main`. No bulk input, no transcript face (that's `--agent` mode on the CLI).
+
+**Progress notification** — An MCP notification emitted at each pipeline stage (fetched → mined → chunk drafted i/n → merged → done) so long calls survive clients with per-request timeouts (pi resets its 60s default on each). Load-bearing contract, not decoration.
+
+**Slim image** — The `[server]`-extra container: no whisper, no retrieval stack, no disk writes. Caption-less videos return a clean error pointing at the CLI's `--allow-whisper`.
