@@ -5,9 +5,11 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from yt_ingest import extract as extract_module
 from yt_ingest.extract import (
     _checksum,
     _chunk_transcript,
+    _prompt_fingerprint,
     extract_from_cache,
     gems_path,
     render_note,
@@ -496,3 +498,64 @@ def test_checksum_differs_for_different_caches() -> None:
     c1 = _make_cache(3)
     c2 = _make_cache(5)
     assert _checksum(c1) != _checksum(c2)
+
+
+# --- prompt-fingerprint checksum invalidation (issue #20) ---
+
+# Private module-level string constants whose names end in _PROMPT are the
+# extraction prompt constants, collected automatically by the fingerprint.
+_PROMPT_ATTRS = [
+    name
+    for name, value in vars(extract_module).items()
+    if name.startswith("_") and name.endswith("_PROMPT") and isinstance(value, str)
+]
+
+
+def test_prompt_fingerprint_covers_all_pipeline_prompts() -> None:
+    # Mine, write (draft + gem guidance), merge, verify, patch.
+    assert len(_PROMPT_ATTRS) == 6
+
+
+def test_prompt_fingerprint_is_deterministic() -> None:
+    assert _prompt_fingerprint() == _prompt_fingerprint()
+
+
+def test_prompt_fingerprint_changes_when_any_prompt_edited() -> None:
+    before = _prompt_fingerprint()
+    for name in _PROMPT_ATTRS:
+        edited = str(vars(extract_module)[name]) + "\n(edited)"
+        with patch.object(extract_module, name, edited):
+            assert _prompt_fingerprint() != before, name
+        assert _prompt_fingerprint() == before, name
+
+
+def test_prompt_fingerprint_ignores_renamed_constant() -> None:
+    # A no-op refactor: same text under a different constant name must not
+    # change the fingerprint (values are hashed, not names).
+    before = _prompt_fingerprint()
+    original = vars(extract_module).pop("_MINING_PROMPT")
+    extract_module._GEM_MINER_PROMPT = original
+    try:
+        assert _prompt_fingerprint() == before
+    finally:
+        del extract_module._GEM_MINER_PROMPT
+        extract_module._MINING_PROMPT = original
+
+
+def test_checksum_changes_when_any_prompt_edited() -> None:
+    cache = _make_cache()
+    before = _checksum(cache)
+    for name in _PROMPT_ATTRS:
+        edited = str(vars(extract_module)[name]) + "\n(edited)"
+        with patch.object(extract_module, name, edited):
+            assert _checksum(cache) != before, name
+        assert _checksum(cache) == before, name
+
+
+def test_checksum_unaffected_by_unrelated_module_state() -> None:
+    # Only prompt constants are fingerprinted; other module constants do not
+    # invalidate checksums.
+    cache = _make_cache()
+    before = _checksum(cache)
+    with patch.object(extract_module, "_CHUNK_TOKENS", 999):
+        assert _checksum(cache) == before

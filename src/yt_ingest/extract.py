@@ -86,7 +86,7 @@ shorter once redundancy is removed.
 
 Return valid JSON: {"blog_post": "merged study notes in markdown format"}"""
 
-_GEM_GUIDANCE = """
+_GEM_GUIDANCE_PROMPT = """
 
 Gem checklist handling:
 - The user message includes a MUST-INCLUDE gem checklist mined from this \
@@ -470,7 +470,7 @@ def extract_from_cache(
         gems = _parse_gems(raw)
         chunk_gems.append(gems)
 
-        system = _DRAFT_PROMPT + _GEM_GUIDANCE if gems else _DRAFT_PROMPT
+        system = _DRAFT_PROMPT + _GEM_GUIDANCE_PROMPT if gems else _DRAFT_PROMPT
         write_msg = user_msg + "\n\n" + _gem_checklist(gems) if gems else user_msg
         raw, stats = chat_json(system=system, user=write_msg)
         drafts.append(raw.get("blog_post", ""))
@@ -497,9 +497,34 @@ def extract_from_cache(
     return note, merged_gems, report, total_stats
 
 
+def _prompt_fingerprint() -> str:
+    """Auto-hash of all extraction prompt constants (issue #20).
+
+    Prompt constants are collected automatically from module globals by
+    naming convention — private string constants whose names end in
+    ``_PROMPT`` — and hashed in sorted value order, without their names.
+    Editing any prompt's text therefore changes the fingerprint, while a
+    no-op refactor (moving or renaming constants) does not. There is no
+    manual version constant to forget to bump.
+    """
+    texts = sorted(
+        value
+        for name, value in globals().items()
+        if name.startswith("_") and name.endswith("_PROMPT") and isinstance(value, str)
+    )
+    return hashlib.sha256("\x00".join(texts).encode()).hexdigest()
+
+
 def _checksum(cache: TranscriptCache) -> str:
-    raw = cache.model_dump_json()
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    """Checksum input: prompt fingerprint + transcript JSON (issue #20).
+
+    Any prompt edit changes the fingerprint, so previously skipped videos
+    re-extract instead of silently serving stale notes.
+    """
+    digest = hashlib.sha256()
+    digest.update(_prompt_fingerprint().encode())
+    digest.update(cache.model_dump_json().encode())
+    return digest.hexdigest()[:16]
 
 
 def render_note(
