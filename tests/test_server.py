@@ -46,6 +46,7 @@ def _ensure_mimetypes() -> None:
 @pytest.fixture()
 def fastmcp_modules() -> None:
     """Import fastmcp with the sandbox-blocked mimetypes DB disabled."""
+    pytest.importorskip("fastmcp")
     _ensure_mimetypes()
     import fastmcp  # noqa: F401
 
@@ -183,6 +184,19 @@ def test_progress_notifications_emitted(fastmcp_modules: None) -> None:
     async def scenario() -> None:
         mcp = build_mcp_server()
         blog_text = "## My Blog Post"
+
+        import yt_ingest.extract as extract_module
+
+        def fake_extract(cache: TranscriptCache) -> tuple[str, object, object, object]:
+            real_chat_json = extract_module.chat_json
+            with patch(
+                "yt_ingest.extract.chat_json",
+                side_effect=lambda **kw: ({"blog_post": "x"}, None),
+            ):
+                real_chat_json(system="gem miner", user="x")
+                real_chat_json(system="study-note writer", user="x")
+            return blog_text, [], None, None
+
         async with Client(mcp, progress_handler=handler) as client:
             with (
                 patch(
@@ -190,8 +204,12 @@ def test_progress_notifications_emitted(fastmcp_modules: None) -> None:
                     return_value=_make_cache(),
                 ),
                 patch(
+                    "yt_ingest.server._chunk_transcript",
+                    return_value=["chunk a"],
+                ),
+                patch(
                     "yt_ingest.server.extract_from_cache",
-                    return_value=(blog_text, [], None, None),
+                    side_effect=fake_extract,
                 ),
                 patch(
                     "yt_ingest.server.render_note",
@@ -231,9 +249,17 @@ def test_progress_notifications_multi_chunk_merges(fastmcp_modules: None) -> Non
         import yt_ingest.extract as extract_module
 
         def fake_extract(cache: TranscriptCache) -> tuple[str, object, object, object]:
-            for system in ("gem miner", "study-note writer", "gem miner",
-                           "study-note writer", "merger", "gem verifier"):
-                extract_module.chat_json(system=system, user="x")
+            # Route each call through the real chat_json seam — but patched at
+            # yt_ingest.extract, so no network. The _StageReporter wrapper in
+            # server.py wraps this same module attribute.
+            real_chat_json = extract_module.chat_json
+            with patch(
+                "yt_ingest.extract.chat_json",
+                side_effect=lambda **kw: ({"blog_post": "x"}, None),
+            ):
+                for system in ("gem miner", "study-note writer", "gem miner",
+                               "study-note writer", "merger", "gem verifier"):
+                    real_chat_json(system=system, user="x")
             return merged_text, [], None, None
 
         async with Client(mcp, progress_handler=handler) as client:

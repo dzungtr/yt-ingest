@@ -17,6 +17,7 @@ on each notification). No disk access: the server is local-state by design —
 from __future__ import annotations
 
 import asyncio
+import queue
 from contextlib import contextmanager
 from types import TracebackType
 from typing import Any, Callable, Iterator
@@ -45,27 +46,25 @@ async def _report_progress(progress: float, message: str, total: float) -> None:
     await ctx.report_progress(progress=progress, total=total, message=message)
 
 
-def _report_progress_from_thread(progress: float, message: str, total: float) -> None:
-    """Emit a progress notification from the sync pipeline thread.
+async def _drain_progress_queue(
+    q: "queue.Queue[tuple[float, str, float]]",
+) -> None:
+    """Replay stage notifications queued by the sync pipeline thread.
 
-    ``extract_from_cache`` is synchronous, so it runs via ``asyncio.to_thread``
-    (contextvars propagate into the worker thread). FastMCP's request
-    ``Context`` is contextvar-bound; the coroutine runs on a fresh loop inside
-    the worker thread because the server loop is not running there.
+    ``extract_from_cache`` runs via ``asyncio.to_thread``; the FastMCP
+    ``Context`` is bound to the server loop, so emitting directly from the
+    worker thread deadlocks (its fresh loop would wait on a transport the
+    server loop owns). Instead the thread enqueues ``(progress, message,
+    total)`` tuples and the tool coroutine drains them on the server loop
+    while the pipeline runs — near-real-time, and each awaited
+    ``report_progress`` resets the client's per-request timeout.
     """
-    from fastmcp.server.context import _current_context
-
-    ctx = _current_context.get()
-    if ctx is None:
-        return
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(
-            ctx.report_progress(progress=progress, total=total, message=message)
-        )
-    finally:
-        loop.close()
+    while True:
+        try:
+            progress, message, total = q.get_nowait()
+        except queue.Empty:
+            return
+        await _report_progress(progress, message, total)
 
 
 class _StageReporter:
@@ -77,21 +76,20 @@ class _StageReporter:
     separate stage (they are part of the merge/verify budget).
     """
 
-    def __init__(self, total_chunks: int) -> None:
+    def __init__(self, total_chunks: int, q: "queue.Queue[tuple[float, str, float]]") -> None:
         self._total_chunks = total_chunks
         self._stage = 1.0
+        self._q = q
 
     def _advance(self, message: str) -> None:
         self._stage += 1.0
-        _report_progress_from_thread(
-            self._stage, message, 2.0 + self._total_chunks + 2.0
-        )
+        self._q.put((self._stage, message, 2.0 + self._total_chunks + 2.0))
 
     @contextmanager
     def wrap_chat_json(self) -> Iterator[None]:
         import yt_ingest.extract as extract_module
 
-        original: Callable[..., Any] = extract_module.chat_json
+        original: Callable[..., Any] = extract_module.chat_json  # type: ignore[attr-defined]
         miner_calls = 0
         writer_calls = 0
         merge_seen = False
@@ -113,11 +111,11 @@ class _StageReporter:
                 self._advance("drafts merged")
             return result
 
-        extract_module.chat_json = wrapped  # type: ignore[assignment]
+        extract_module.chat_json = wrapped  # type: ignore[attr-defined]
         try:
             yield
         finally:
-            extract_module.chat_json = original  # type: ignore[assignment]
+            extract_module.chat_json = original  # type: ignore[attr-defined]
 
     def __enter__(self) -> _StageReporter:
         return self
@@ -155,14 +153,20 @@ async def write_study_note_impl(url: str) -> str:
     await _report_progress(1.0, "transcript fetched", 5.0)
 
     total_chunks = len(_chunk_transcript(cache))
-    reporter = _StageReporter(total_chunks)
+    events: "queue.Queue[tuple[float, str, float]]" = queue.Queue()
+    reporter = _StageReporter(total_chunks, events)
 
     def pipeline() -> str:
         with reporter.wrap_chat_json():
             blog_post, _gems, _report, _stats = extract_from_cache(cache)
         return render_note(cache, blog_post)
 
-    note = await asyncio.to_thread(pipeline)
+    task = asyncio.create_task(asyncio.to_thread(pipeline))
+    while not task.done():
+        await asyncio.sleep(0.2)
+        await _drain_progress_queue(events)
+    note = await task
+    await _drain_progress_queue(events)
     await _report_progress(
         float(2 + total_chunks + 2), "done", 5.0 + total_chunks
     )

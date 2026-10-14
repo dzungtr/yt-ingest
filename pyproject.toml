@@ -54,6 +54,7 @@ anthropic = [
 # CLI face: console script lives under the `[cli]` extra's packages.
 [project.scripts]
 yt-ingest = "yt_ingest.cli:app"
+yt-ingest-serve = "yt_ingest.server:serve"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/yt_ingest"]
