@@ -17,10 +17,12 @@ from yt_ingest.synthesize import (
     synthesize_notes,
 )
 from yt_ingest.extract import (
+    audit_path,
     checksum_path,
     extract_from_cache,
     gems_path,
     note_path,
+    render_audit_md,
     render_note,
     _checksum,
 )
@@ -199,7 +201,7 @@ def extract() -> None:
             f"[dim]Extracting[/dim] {cache.video_id}  [dim]{cache.title[:50]}[/dim]…",
             spinner="dots",
         ):
-            content, gems, stats = extract_from_cache(cache)
+            content, gems, report, stats = extract_from_cache(cache)
 
         note = render_note(cache, content)
         npath.write_text(note)
@@ -207,6 +209,10 @@ def extract() -> None:
         gems_file.write_text(
             json.dumps([g.model_dump(mode="json") for g in gems], indent=2)
         )
+        if report is not None:
+            audit_path(cfg.notes_dir, cache.video_id).write_text(
+                render_audit_md(cache.video_id, gems, report)
+            )
         cpath.write_text(current_cs)
         console.print(
             f"[green]OK  [/green]  {cache.video_id}  "
@@ -343,7 +349,7 @@ def run(
             rprint(text)
         return
 
-    content, _gems, _stats = extract_from_cache(cache)
+    content, _gems, _report, _stats = extract_from_cache(cache)
     note = render_note(cache, content)
 
     if output is not None:

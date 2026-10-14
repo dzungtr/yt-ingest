@@ -106,6 +106,8 @@ def _dispatch_mine_write(
         system = str(kwargs.get("system", ""))
         if "gem miner" in system:
             return mine_payload, stats
+        if "gem verifier" in system:
+            return {"verdict": "covered", "reason": "present", "note_span": "b"}, stats
         return {"blog_post": blog_text}, stats
 
     return fake_chat_json
@@ -122,14 +124,15 @@ def test_extract_from_cache_single_chunk_mines_then_writes() -> None:
         return _dispatch_mine_write(_GEMS_PAYLOAD, blog_text, stats)(**kwargs)
 
     with patch("yt_ingest.extract.chat_json", side_effect=fake_chat_json):
-        result, gems, result_stats = extract_from_cache(cache)
+        result, gems, _report, result_stats = extract_from_cache(cache)
 
     assert result == blog_text
-    assert result_stats.total_calls == 2
-    assert len(calls) == 2
-    # Stage order: mine first, then gem-guided write.
+    assert result_stats.total_calls == 4
+    assert len(calls) == 4
+    # Stage order: mine first, then gem-guided write, then per-gem verification.
     assert "gem miner" in str(calls[0]["system"])
     assert "study-note writer" in str(calls[1]["system"])
+    assert all("gem verifier" in str(c["system"]) for c in calls[2:])
     # Gem-guided writing: the writer sees the chunk's gems as a must-include checklist.
     assert "MUST-INCLUDE" in str(calls[1]["user"])
     assert "Savings buildup leads to risk chasing." in str(calls[1]["user"])
@@ -165,7 +168,7 @@ def test_extract_from_cache_caps_gems_at_per_chunk_cap() -> None:
         "yt_ingest.extract.chat_json",
         side_effect=_dispatch_mine_write(big_payload, blog_text, stats),
     ):
-        _, gems, _ = extract_from_cache(cache)
+        _, gems, _report, _ = extract_from_cache(cache)
 
     assert len(gems) == 12
     assert [g.rank for g in gems] == list(range(1, 13))
@@ -206,7 +209,7 @@ def test_extract_from_cache_merges_multiple_chunks_and_gems() -> None:
         ),
         patch("yt_ingest.extract.chat_json", side_effect=fake_chat_json),
     ):
-        result, gems, _ = extract_from_cache(cache)
+        result, gems, _report, _ = extract_from_cache(cache)
 
     assert result == merged
     # 2 chunks x (mine + write) + 1 merge call
